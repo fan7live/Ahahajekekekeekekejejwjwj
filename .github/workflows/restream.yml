@@ -1,0 +1,191 @@
+name: Scrambled Restream
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:  { description: 'Source URL', required: true }
+      referer:     { description: 'Referer', required: false }
+      rtmp_url:    { description: 'RTMP URL', required: true }
+      stream_key:  { description: 'Stream Key', required: true }
+      seed:        { description: 'Shared secret', required: true, default: '987654321' }
+      grid:        { description: 'Grid', required: true, default: '10' }
+      quality:     { description: 'Target Quality', required: true, default: 'original' }
+      is_loop:     { description: 'Loop Video (true/false)', required: true, default: 'false' }
+      overlay_url: { description: 'Overlay Image URL (Optional)', required: false, default: 'none' }
+
+jobs:
+  restream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - run: echo "::add-mask::${{ inputs.stream_key }}"
+      
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 curl
+
+      - name: Probe source and Set Dimensions
+        env:
+          SRC: ${{ inputs.source_url }}
+          REFERER: ${{ inputs.referer }}
+          QUAL: ${{ inputs.quality }}
+        run: |
+          UA="Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
+          DIMS=$(ffprobe -v error \
+            -user_agent "$UA" \
+            ${REFERER:+-headers "Referer: $REFERER\r\n"} \
+            -select_streams v:0 \
+            -show_entries stream=width,height \
+            -of csv=p=0:s=x \
+            "$SRC" | head -1)
+          SRC_W=$(echo "$DIMS" | cut -dx -f1)
+          SRC_H=$(echo "$DIMS" | cut -dx -f2)
+          if [ -z "$SRC_W" ] || [ -z "$SRC_H" ]; then
+            SRC_W=1920; SRC_H=1080
+          fi
+          
+          if [ "$QUAL" != "original" ]; then
+             SRC_H=$QUAL
+             SRC_W=$(( (SRC_H * 16) / 9 ))
+          fi
+
+          HAS_AUD=$(ffprobe -v error \
+            -user_agent "$UA" \
+            ${REFERER:+-headers "Referer: $REFERER\r\n"} \
+            -select_streams a:0 \
+            -show_entries stream=index \
+            -of csv=p=0 \
+            "$SRC" | head -1)
+
+          if [ -z "$HAS_AUD" ]; then
+            echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
+          else
+            echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
+          fi
+
+          G=${{ inputs.grid }}
+          # إرجاع الحسابات لمضاعفات 4 لاستعادة جودة 1080p كاملة بدون فقدان
+          TW=$(( (SRC_W / G) / 4 * 4 ))
+          TH=$(( (SRC_H / G) / 4 * 4 ))
+          
+          if [ "$TW" -eq 0 ]; then TW=4; fi
+          if [ "$TH" -eq 0 ]; then TH=4; fi
+
+          W=$((TW * G))
+          H=$((TH * G))
+          echo "Source/Target: ${SRC_W}x${SRC_H} -> ${W}x${H}, tile=${TW}x${TH}"
+          
+          echo "SRC_W=$SRC_W" >> "$GITHUB_ENV"
+          echo "SRC_H=$SRC_H" >> "$GITHUB_ENV"
+          echo "W=$W" >> "$GITHUB_ENV"
+          echo "H=$H" >> "$GITHUB_ENV"
+          echo "TW=$TW" >> "$GITHUB_ENV"
+          echo "TH=$TH" >> "$GITHUB_ENV"
+
+      - name: Build filter
+        env:
+          GRID: ${{ inputs.grid }}
+          SEED: ${{ inputs.seed }}
+          OVERLAY: ${{ inputs.overlay_url }}
+          W: ${{ env.W }}
+          H: ${{ env.H }}
+          TW: ${{ env.TW }}
+          TH: ${{ env.TH }}
+        run: |
+          python3 << 'PY' > filter.txt
+          import os
+          g = int(os.environ.get("GRID", "10"))
+          seed = int(os.environ.get("SEED", "987654321"))
+          W = int(os.environ.get("W", "1920"))
+          H = int(os.environ.get("H", "1080"))
+          tw = int(os.environ.get("TW", "192"))
+          th = int(os.environ.get("TH", "108"))
+          overlay_url = os.environ.get("OVERLAY", "none").strip()
+          has_overlay = (overlay_url != "" and overlay_url != "none")
+          n = g * g
+
+          parts = []
+          if n == 1:
+              base_filter = f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1,fps=20"
+              if has_overlay:
+                  parts.append(f"{base_filter}[v_main]")
+                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic[over]")
+                  parts.append("[v_main][over]overlay=0:0,format=yuv420p[out]")
+              else:
+                  parts.append(f"{base_filter},format=yuv420p[out]")
+          else:
+              state = seed & 0xFFFFFFFF
+              def rnd():
+                  global state
+                  state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+                  return state
+              perm = list(range(n))
+              for i in range(n - 1, 0, -1):
+                  j = rnd() % (i + 1)
+                  perm[i], perm[j] = perm[j], perm[i]
+
+              parts.append(f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1,fps=20,split={n}" + "".join(f"[s{i}]" for i in range(n)))
+              for i in range(n):
+                  parts.append(f"[s{i}]crop={tw}:{th}:{(i%g)*tw}:{(i//g)*th}[c{i}]")
+              xin = "".join(f"[c{perm[o]}]" for o in range(n))
+              layout = "|".join(f"{(o%g)*tw}_{(o//g)*th}" for o in range(n))
+              parts.append(f"{xin}xstack=inputs={n}:layout={layout}[v_main]")
+
+              if has_overlay:
+                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic[over]")
+                  parts.append("[v_main][over]overlay=0:0,format=yuv420p[out]")
+              else:
+                  parts.append("[v_main]format=yuv420p[out]")
+          
+          print(";".join(parts))
+          PY
+
+      - name: Stream
+        env:
+          SRC: ${{ inputs.source_url }}
+          RTMP: ${{ inputs.rtmp_url }}
+          KEY: ${{ inputs.stream_key }}
+          REFERER: ${{ inputs.referer }}
+          IS_LOOP: ${{ inputs.is_loop }}
+          OVERLAY_URL: ${{ inputs.overlay_url }}
+          SRC_H: ${{ env.SRC_H }}
+          HAVE_AUDIO: ${{ env.HAVE_AUDIO }}
+        run: |
+          FILTER=$(cat filter.txt)
+          if [ "$SRC_H" -ge 1080 ]; then VBR="6000k"; elif [ "$SRC_H" -ge 720 ]; then VBR="3500k"; else VBR="2000k"; fi
+          BUF=$((${VBR%k} * 2))k
+
+          LOOP_ARG=""
+          if [ "$IS_LOOP" == "true" ]; then
+            LOOP_ARG="-stream_loop -1"
+          fi
+
+          INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
+          if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
+            curl -sL "$OVERLAY_URL" -o overlay.png
+            INPUT_ARGS="$INPUT_ARGS -thread_queue_size 1024 -loop 1 -i overlay.png"
+          fi
+
+          if [ "$HAVE_AUDIO" == "false" ]; then
+            FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
+            MAP_AUDIO="-map [aud_out]"
+          else
+            MAP_AUDIO="-map 0:a:0?"
+          fi
+
+          while true; do
+            ffmpeg -hide_banner -loglevel error \
+              -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 \
+              -user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36" \
+              ${REFERER:+-headers "Referer: $REFERER\r\n"} \
+              $INPUT_ARGS \
+              -filter_complex "$FILTER" \
+              -map "[out]" $MAP_AUDIO \
+              -c:v libx264 -preset ultrafast -tune zerolatency \
+              -threads 2 -pix_fmt yuv420p \
+              -x264-params "no-deblock=1:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none" \
+              -b:v $VBR -maxrate $VBR -bufsize $BUF -g 40 \
+              -c:a aac -b:a 128k -ar 44100 -ac 2 \
+              -max_muxing_queue_size 1024 \
+              -f flv "$RTMP/$KEY" || true
+            sleep 5
+          done
