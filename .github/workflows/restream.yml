@@ -181,7 +181,7 @@ jobs:
               -map "[out]" $MAP_AUDIO \
               -c:v libx264 -preset ultrafast -tune zerolatency \
               -threads 2 -pix_fmt yuv420p \
-              -x264-params "deblock=1,1:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none" \
+              -x264-params "no-deblock=1:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none" \
               -b:v $VBR -maxrate $VBR -bufsize $BUF -g 40 \
               -c:a aac -b:a 128k -ar 44100 -ac 2 \
               -max_muxing_queue_size 1024 \
