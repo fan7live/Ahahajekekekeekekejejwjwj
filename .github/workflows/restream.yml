@@ -104,14 +104,24 @@ jobs:
 
           parts = []
           if n == 1:
-              base_filter = f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1,fps=20"
+              # ============================================================
+              # بث نقي 1x1: أخف طريقة ممكنة لتجنب التقطيع
+              # fast_bilinear بدل bicubic = CPU أقل بكثير
+              # movie filter بدل -loop 1 -i = لا يوجد pts desync أبداً
+              # ============================================================
+              base_filter = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1,fps=20"
               if has_overlay:
                   parts.append(f"{base_filter}[v_main]")
-                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic[over]")
-                  parts.append("[v_main][over]overlay=0:0,format=yuv420p[out]")
+                  # movie filter: يحمل الصورة داخل filter graph مباشرةً
+                  # eof_action=repeat: يكرر آخر frame (الصورة الثابتة) طوال البث
+                  parts.append(f"movie=overlay.png,scale={W}:{H}:flags=fast_bilinear,format=rgba[over]")
+                  parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
                   parts.append(f"{base_filter},format=yuv420p[out]")
           else:
+              # ============================================================
+              # بث مقسم (n>1): لا تغيير - النظام كما هو تماماً
+              # ============================================================
               state = seed & 0xFFFFFFFF
               def rnd():
                   global state
@@ -146,6 +156,7 @@ jobs:
           REFERER: ${{ inputs.referer }}
           IS_LOOP: ${{ inputs.is_loop }}
           OVERLAY_URL: ${{ inputs.overlay_url }}
+          GRID: ${{ inputs.grid }}       # ← مضاف: لتحديد طريقة تحميل الـ overlay
           SRC_H: ${{ env.SRC_H }}
           HAVE_AUDIO: ${{ env.HAVE_AUDIO }}
         run: |
@@ -170,9 +181,15 @@ jobs:
           fi
 
           INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
+
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png
-            INPUT_ARGS="$INPUT_ARGS -thread_queue_size 1024 -loop 1 -i overlay.png"
+            if [ "$GRID" -gt 1 ]; then
+              # البث المقسم: الصورة كـ input ثاني [1:v] كما كانت
+              INPUT_ARGS="$INPUT_ARGS -thread_queue_size 1024 -loop 1 -i overlay.png"
+            fi
+            # البث النقي 1x1: movie filter يقرأ overlay.png مباشرةً
+            # لا نضيف -i لأن ذلك يسبب pts desync والتقطيع
           fi
 
           if [ "$HAVE_AUDIO" == "false" ]; then
