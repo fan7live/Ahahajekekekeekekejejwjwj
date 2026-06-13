@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 355
     steps:
       - run: echo "::add-mask::${{ inputs.stream_key }}"
-      
+
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 curl
 
@@ -42,7 +42,7 @@ jobs:
           if [ -z "$SRC_W" ] || [ -z "$SRC_H" ]; then
             SRC_W=1920; SRC_H=1080
           fi
-          
+
           if [ "$QUAL" != "original" ]; then
              SRC_H=$QUAL
              SRC_W=$(( (SRC_H * 16) / 9 ))
@@ -65,14 +65,14 @@ jobs:
           G=${{ inputs.grid }}
           TW=$(( (SRC_W / G) / 4 * 4 ))
           TH=$(( (SRC_H / G) / 4 * 4 ))
-          
+
           if [ "$TW" -eq 0 ]; then TW=4; fi
           if [ "$TH" -eq 0 ]; then TH=4; fi
 
           W=$((TW * G))
           H=$((TH * G))
           echo "Source/Target: ${SRC_W}x${SRC_H} -> ${W}x${H}, tile=${TW}x${TH}"
-          
+
           echo "SRC_W=$SRC_W" >> "$GITHUB_ENV"
           echo "SRC_H=$SRC_H" >> "$GITHUB_ENV"
           echo "W=$W" >> "$GITHUB_ENV"
@@ -89,6 +89,8 @@ jobs:
           H: ${{ env.H }}
           TW: ${{ env.TW }}
           TH: ${{ env.TH }}
+          SRC_W: ${{ env.SRC_W }}
+          SRC_H: ${{ env.SRC_H }}
         run: |
           python3 << 'PY' > filter.txt
           import os
@@ -104,24 +106,30 @@ jobs:
 
           parts = []
           if n == 1:
-              # ============================================================
-              # بث نقي 1x1: أخف طريقة ممكنة لتجنب التقطيع
-              # fast_bilinear بدل bicubic = CPU أقل بكثير
-              # movie filter بدل -loop 1 -i = لا يوجد pts desync أبداً
-              # ============================================================
-              base_filter = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1,fps=20"
+              # ==============================================================
+              # بث نقي 1x1 — أقل استهلاك ممكن للـ CPU
+              # ==============================================================
+              src_w = int(os.environ.get("SRC_W", str(W)))
+              src_h = int(os.environ.get("SRC_H", str(H)))
+
+              # إذا المصدر بنفس الأبعاد المطلوبة نتجاوز الـ scale كلياً (توفير per-frame)
+              if W != src_w or H != src_h:
+                  main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1,fps=20"
+              else:
+                  main_vf = f"[0:v]setsar=1,fps=20"
+
               if has_overlay:
-                  parts.append(f"{base_filter}[v_main]")
-                  # movie filter: يحمل الصورة داخل filter graph مباشرةً
-                  # eof_action=repeat: يكرر آخر frame (الصورة الثابتة) طوال البث
+                  parts.append(f"{main_vf}[v_main]")
+                  # movie filter بدل -loop 1 -i: يلغي pts desync ويحل التقطيع
+                  # eof_action=repeat: يكرر الصورة الثابتة طوال البث بدون sync issues
                   parts.append(f"movie=overlay.png,scale={W}:{H}:flags=fast_bilinear,format=rgba[over]")
                   parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
-                  parts.append(f"{base_filter},format=yuv420p[out]")
+                  parts.append(f"{main_vf},format=yuv420p[out]")
           else:
-              # ============================================================
-              # بث مقسم (n>1): لا تغيير - النظام كما هو تماماً
-              # ============================================================
+              # ==============================================================
+              # بث مقسم n>1 — لم يُمس شيء
+              # ==============================================================
               state = seed & 0xFFFFFFFF
               def rnd():
                   global state
@@ -144,7 +152,7 @@ jobs:
                   parts.append("[v_main][over]overlay=0:0,format=yuv420p[out]")
               else:
                   parts.append("[v_main]format=yuv420p[out]")
-          
+
           print(";".join(parts))
           PY
 
@@ -156,7 +164,7 @@ jobs:
           REFERER: ${{ inputs.referer }}
           IS_LOOP: ${{ inputs.is_loop }}
           OVERLAY_URL: ${{ inputs.overlay_url }}
-          GRID: ${{ inputs.grid }}       # ← مضاف: لتحديد طريقة تحميل الـ overlay
+          GRID: ${{ inputs.grid }}
           SRC_H: ${{ env.SRC_H }}
           HAVE_AUDIO: ${{ env.HAVE_AUDIO }}
         run: |
@@ -181,15 +189,13 @@ jobs:
           fi
 
           INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
-
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png
+            # 1x1: movie filter داخل filter graph يقرأ overlay.png مباشرةً — لا input ثاني
+            # n>1: الصورة كـ [1:v] input كما كانت دائماً — لم يتغير شيء
             if [ "$GRID" -gt 1 ]; then
-              # البث المقسم: الصورة كـ input ثاني [1:v] كما كانت
               INPUT_ARGS="$INPUT_ARGS -thread_queue_size 1024 -loop 1 -i overlay.png"
             fi
-            # البث النقي 1x1: movie filter يقرأ overlay.png مباشرةً
-            # لا نضيف -i لأن ذلك يسبب pts desync والتقطيع
           fi
 
           if [ "$HAVE_AUDIO" == "false" ]; then
