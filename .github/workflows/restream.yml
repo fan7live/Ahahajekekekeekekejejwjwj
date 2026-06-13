@@ -107,21 +107,20 @@ jobs:
           parts = []
           if n == 1:
               # ==============================================================
-              # بث نقي 1x1 — أقل استهلاك ممكن للـ CPU
+              # بث نقي 1x1
+              # fps=30 بدل fps=20 — يجبر Kick و باقي المنصات تتعرف على 1080p
+              # fps=20 غير قياسي وKick يصنفه كـ 720p تلقائياً
               # ==============================================================
               src_w = int(os.environ.get("SRC_W", str(W)))
               src_h = int(os.environ.get("SRC_H", str(H)))
 
-              # إذا المصدر بنفس الأبعاد المطلوبة نتجاوز الـ scale كلياً (توفير per-frame)
               if W != src_w or H != src_h:
-                  main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1,fps=20"
+                  main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1,fps=30"
               else:
-                  main_vf = f"[0:v]setsar=1,fps=20"
+                  main_vf = f"[0:v]setsar=1,fps=30"
 
               if has_overlay:
                   parts.append(f"{main_vf}[v_main]")
-                  # movie filter بدل -loop 1 -i: يلغي pts desync ويحل التقطيع
-                  # eof_action=repeat: يكرر الصورة الثابتة طوال البث بدون sync issues
                   parts.append(f"movie=overlay.png,scale={W}:{H}:flags=fast_bilinear,format=rgba[over]")
                   parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
@@ -170,7 +169,6 @@ jobs:
         run: |
           FILTER=$(cat filter.txt)
 
-          # ضبط الـ bitrate والـ deblock حسب الجودة
           if [ "$SRC_H" -ge 1080 ]; then
             VBR="6000k"
             DEBLOCK="deblock=1,1"
@@ -191,8 +189,6 @@ jobs:
           INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png
-            # 1x1: movie filter داخل filter graph يقرأ overlay.png مباشرةً — لا input ثاني
-            # n>1: الصورة كـ [1:v] input كما كانت دائماً — لم يتغير شيء
             if [ "$GRID" -gt 1 ]; then
               INPUT_ARGS="$INPUT_ARGS -thread_queue_size 1024 -loop 1 -i overlay.png"
             fi
