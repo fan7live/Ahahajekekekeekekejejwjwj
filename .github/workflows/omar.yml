@@ -37,22 +37,24 @@ jobs:
         run: |
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
 
-          # إعدادات الشعار إذا تم توفيره
           if [ -n "$LOGO_URL" ]; then
             echo "تحميل صورة الشعار..."
             curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الصورة"; exit 1; }
-            # إضافة مدخل الصورة وفلتر التغطية الكاملة
-            FILTER_COMPLEX="-i logo.png -filter_complex \"[1:v]scale=1920:1080[logo];[0:v][logo]overlay=0:0\""
-            MAP_VIDEO="-map [v]"
+            echo "بدء البث مع الشعار..."
+            ffmpeg -re -fflags +genpts -i "$SOURCE_URL" -i logo.png \
+              -filter_complex "[1:v]scale=1920:1080[logo];[0:v][logo]overlay=0:0" \
+              -c:v libx264 -preset ultrafast -tune zerolatency \
+              -b:v 9000k -maxrate 9500k -bufsize 18000k \
+              -s 1920x1080 -r 60 -g 120 \
+              -c:a aac -b:a 192k -ar 48000 -ac 2 \
+              -map [v] -map 0:a \
+              -f flv "$OUTPUT_URL"
           else
-            FILTER_COMPLEX=""
-            MAP_VIDEO="-map 0:v"
+            echo "بدء البث بدون شعار..."
+            ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
+              -c:v libx264 -preset ultrafast -tune zerolatency \
+              -b:v 9000k -maxrate 9500k -bufsize 18000k \
+              -s 1920x1080 -r 60 -g 120 \
+              -c:a aac -b:a 192k -ar 48000 -ac 2 \
+              -f flv "$OUTPUT_URL"
           fi
-
-          ffmpeg -re -fflags +genpts -i "$SOURCE_URL" $FILTER_COMPLEX \
-            -c:v libx264 -preset ultrafast -tune zerolatency \
-            -b:v 9000k -maxrate 9500k -bufsize 18000k \
-            -s 1920x1080 -r 60 -g 120 \
-            -c:a aac -b:a 192k -ar 48000 -ac 2 \
-            $MAP_VIDEO -map 0:a \
-            -f flv "$OUTPUT_URL"
