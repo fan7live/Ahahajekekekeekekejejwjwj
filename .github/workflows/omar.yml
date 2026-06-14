@@ -1,4 +1,4 @@
-name: "بث مباشر - تحويل 4K إلى 720p"
+name: "بث مباشر - تحويل 4K إلى 1080p"
 
 on:
   workflow_dispatch:
@@ -32,13 +32,12 @@ jobs:
           RTMP_BASE: ${{ inputs.rtmp_base }}
           STREAM_KEY: ${{ inputs.stream_key }}
         run: |
-          # بناء رابط الإخراج النهائي (rtmp://.../live/مفتاح)
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
           echo "المصدر: $SOURCE_URL"
           echo "الإخراج: $OUTPUT_URL"
-          
+
           ffmpeg -re -i "$SOURCE_URL" \
-            -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2500k -bufsize 4000k \
-            -s 1280x720 -r 30 \
+            -c:v libx264 -preset veryfast -b:v 4000k -maxrate 5000k -bufsize 8000k \
+            -s 1920x1080 -r 30 \
             -c:a aac -b:a 128k -ar 44100 -ac 2 \
             -f flv "$OUTPUT_URL"
