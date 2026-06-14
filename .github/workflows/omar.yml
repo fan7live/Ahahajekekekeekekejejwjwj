@@ -41,8 +41,9 @@ jobs:
             echo "تحميل صورة الشعار..."
             curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الصورة"; exit 1; }
             echo "بدء البث مع الشعار..."
-            ffmpeg -re -fflags +genpts -i "$SOURCE_URL" -i logo.png \
-              -filter_complex "[1:v]scale=1920:1080:flags=fast_bilinear,format=rgba[logo];[0:v][logo]overlay=0:0:eof_action=repeat,format=yuv420p[v]" \
+            # مهم: لا نستخدم -i logo.png هنا، بل نعتمد على movie=logo.png داخل الفلتر
+            ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
+              -filter_complex "movie=logo.png,scale=1920:1080:flags=fast_bilinear,format=rgba[over];[0:v][over]overlay=0:0:eof_action=repeat,format=yuv420p[v]" \
               -c:v libx264 -preset ultrafast -tune zerolatency \
               -b:v 9000k -maxrate 9500k -bufsize 18000k \
               -s 1920x1080 -r 60 -g 120 \
