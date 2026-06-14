@@ -1,45 +1,39 @@
-name: "بث مباشر - تحويل 4K إلى 1080p 60fps - Kick Max Quality"
+name: "بث 1080p خفيف المعالج - جودة عالية"
 
 on:
   workflow_dispatch:
     inputs:
       source_url:
-        description: 'رابط المصدر (HLS)'
+        description: 'رابط المصدر (4K HLS)'
         required: true
         default: 'http://tv.business-cdn-8k.com/live/503dc9e25f02/92d1a3bb8a/2023294.m3u8'
       rtmp_base:
-        description: 'رابط RTMP الأساسي (مثال: rtmp://live.kick.com/app)'
+        description: 'رابط RTMP (تويتش)'
         required: true
-        default: 'rtmp://live.kick.com/app'
+        default: 'rtmp://live.twitch.tv/app'
       stream_key:
-        description: 'مفتاح البث (Stream Key)'
+        description: 'مفتاح البث'
         required: true
-        default: 'your-kick-stream-key'
+        default: 'live_XXXXXXXXXX'
 
 jobs:
-  transcode:
+  stream_1080p_ultrafast:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
       - name: تثبيت ffmpeg
-        run: |
-          sudo apt update
-          sudo apt install -y ffmpeg
+        run: sudo apt update && sudo apt install -y ffmpeg
 
-      - name: التحويل وإعادة البث إلى Kick
+      - name: تشغيل البث الخفيف جداً بجودة عالية
         env:
           SOURCE_URL: ${{ inputs.source_url }}
           RTMP_BASE: ${{ inputs.rtmp_base }}
           STREAM_KEY: ${{ inputs.stream_key }}
         run: |
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
-          echo "المصدر: $SOURCE_URL"
-          echo "الإخراج: $OUTPUT_URL"
-
-          ffmpeg -re -i "$SOURCE_URL" \
-            -c:v libx264 -preset veryfast \
+          ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
+            -c:v libx264 -preset ultrafast -tune zerolatency \
             -b:v 8000k -maxrate 8500k -bufsize 16000k \
-            -s 1920x1080 -r 60 \
-            -g 120 -keyint_min 60 \
-            -c:a aac -b:a 192k -ar 44100 -ac 2 \
+            -s 1920x1080 -r 30 -g 60 \
+            -c:a aac -b:a 160k -ar 44100 -ac 2 \
             -f flv "$OUTPUT_URL"
