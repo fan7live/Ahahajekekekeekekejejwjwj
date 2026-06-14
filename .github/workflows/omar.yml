@@ -42,12 +42,12 @@ jobs:
             curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الصورة"; exit 1; }
             echo "بدء البث مع الشعار..."
             ffmpeg -re -fflags +genpts -i "$SOURCE_URL" -i logo.png \
-              -filter_complex "[1:v]scale=1920:1080[logo];[0:v][logo]overlay=0:0" \
+              -filter_complex "[1:v]scale=1920:1080[logo];[0:v][logo]overlay=0:0[v]" \
               -c:v libx264 -preset ultrafast -tune zerolatency \
               -b:v 9000k -maxrate 9500k -bufsize 18000k \
               -s 1920x1080 -r 60 -g 120 \
               -c:a aac -b:a 192k -ar 48000 -ac 2 \
-              -map [v] -map 0:a \
+              -map "[v]" -map 0:a \
               -f flv "$OUTPUT_URL"
           else
             echo "بدء البث بدون شعار..."
