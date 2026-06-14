@@ -1,0 +1,44 @@
+name: "بث مباشر - تحويل 4K إلى 720p"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: 'رابط المصدر (HLS)'
+        required: true
+        default: 'http://tv.business-cdn-8k.com/live/503dc9e25f02/92d1a3bb8a/2023294.m3u8'
+      rtmp_base:
+        description: 'رابط RTMP الأساسي (مثال: rtmp://123.45.67.89/live)'
+        required: true
+        default: 'rtmp://your-vps-ip/live'
+      stream_key:
+        description: 'مفتاح البث (Stream Key)'
+        required: true
+        default: 'your-secret-key'
+
+jobs:
+  transcode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: تثبيت ffmpeg
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg
+
+      - name: التحويل وإعادة البث
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+          RTMP_BASE: ${{ inputs.rtmp_base }}
+          STREAM_KEY: ${{ inputs.stream_key }}
+        run: |
+          # بناء رابط الإخراج النهائي (rtmp://.../live/مفتاح)
+          OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
+          echo "المصدر: $SOURCE_URL"
+          echo "الإخراج: $OUTPUT_URL"
+          
+          ffmpeg -re -i "$SOURCE_URL" \
+            -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2500k -bufsize 4000k \
+            -s 1280x720 -r 30 \
+            -c:a aac -b:a 128k -ar 44100 -ac 2 \
+            -f flv "$OUTPUT_URL"
