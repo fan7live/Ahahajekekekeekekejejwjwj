@@ -1,4 +1,4 @@
-name: "بث 1080p 60fps لفيسبوك - أقصى جودة (ultrafast)"
+name: "بث 1080p 60fps لفيسبوك - أقصى جودة (ultrafast) + شعار"
 
 on:
   workflow_dispatch:
@@ -15,25 +15,44 @@ on:
         description: 'مفتاح البث الدائم لفيسبوك'
         required: true
         default: 'FB-XXXXXXXXXXXXXX'
+      logo_url:
+        description: 'رابط صورة الشعار (اختياري، اتركه فارغاً إن لم ترد شعار)'
+        required: false
+        default: ''
 
 jobs:
-  stream_fb_max:
+  stream_fb_max_with_logo:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
       - name: تثبيت ffmpeg
         run: sudo apt update && sudo apt install -y ffmpeg
 
-      - name: بث فيسبوك عالي الجودة
+      - name: بث فيسبوك عالي الجودة مع شعار (إن وجد)
         env:
           SOURCE_URL: ${{ inputs.source_url }}
           RTMP_BASE: ${{ inputs.rtmp_base }}
           STREAM_KEY: ${{ inputs.stream_key }}
+          LOGO_URL: ${{ inputs.logo_url }}
         run: |
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
-          ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
+
+          # إعدادات الشعار إذا تم توفيره
+          if [ -n "$LOGO_URL" ]; then
+            echo "تحميل صورة الشعار..."
+            curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الصورة"; exit 1; }
+            # إضافة مدخل الصورة وفلتر التغطية الكاملة
+            FILTER_COMPLEX="-i logo.png -filter_complex \"[1:v]scale=1920:1080[logo];[0:v][logo]overlay=0:0\""
+            MAP_VIDEO="-map [v]"
+          else
+            FILTER_COMPLEX=""
+            MAP_VIDEO="-map 0:v"
+          fi
+
+          ffmpeg -re -fflags +genpts -i "$SOURCE_URL" $FILTER_COMPLEX \
             -c:v libx264 -preset ultrafast -tune zerolatency \
             -b:v 9000k -maxrate 9500k -bufsize 18000k \
             -s 1920x1080 -r 60 -g 120 \
             -c:a aac -b:a 192k -ar 48000 -ac 2 \
+            $MAP_VIDEO -map 0:a \
             -f flv "$OUTPUT_URL"
