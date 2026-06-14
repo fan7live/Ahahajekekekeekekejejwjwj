@@ -1,4 +1,4 @@
-name: "بث مباشر - تحويل 4K إلى 1080p"
+name: "بث مباشر - تحويل 4K إلى 1080p 60fps - Kick Max Quality"
 
 on:
   workflow_dispatch:
@@ -8,13 +8,13 @@ on:
         required: true
         default: 'http://tv.business-cdn-8k.com/live/503dc9e25f02/92d1a3bb8a/2023294.m3u8'
       rtmp_base:
-        description: 'رابط RTMP الأساسي (مثال: rtmp://123.45.67.89/live)'
+        description: 'رابط RTMP الأساسي (مثال: rtmp://live.kick.com/app)'
         required: true
-        default: 'rtmp://your-vps-ip/live'
+        default: 'rtmp://live.kick.com/app'
       stream_key:
         description: 'مفتاح البث (Stream Key)'
         required: true
-        default: 'your-secret-key'
+        default: 'your-kick-stream-key'
 
 jobs:
   transcode:
@@ -26,7 +26,7 @@ jobs:
           sudo apt update
           sudo apt install -y ffmpeg
 
-      - name: التحويل وإعادة البث
+      - name: التحويل وإعادة البث إلى Kick
         env:
           SOURCE_URL: ${{ inputs.source_url }}
           RTMP_BASE: ${{ inputs.rtmp_base }}
@@ -37,7 +37,9 @@ jobs:
           echo "الإخراج: $OUTPUT_URL"
 
           ffmpeg -re -i "$SOURCE_URL" \
-            -c:v libx264 -preset veryfast -b:v 4000k -maxrate 5000k -bufsize 8000k \
-            -s 1920x1080 -r 30 \
-            -c:a aac -b:a 128k -ar 44100 -ac 2 \
+            -c:v libx264 -preset veryfast \
+            -b:v 8000k -maxrate 8500k -bufsize 16000k \
+            -s 1920x1080 -r 60 \
+            -g 120 -keyint_min 60 \
+            -c:a aac -b:a 192k -ar 44100 -ac 2 \
             -f flv "$OUTPUT_URL"
