@@ -1,4 +1,4 @@
-name: "بث 1080p 60fps لفيسبوك - أقصى جودة (ultrafast) + شعار يملأ الشاشة"
+name: "بث OK.ru - أقصى جودة + شعار يملأ الشاشة (H.264 1080p60)"
 
 on:
   workflow_dispatch:
@@ -6,29 +6,29 @@ on:
       source_url:
         description: 'رابط المصدر (4K HLS)'
         required: true
-        default: 'http://tv.business-cdn-8k.com/live/503dc9e25f02/92d1a3bb8a/2023294.m3u8'
+        default: 'http://tv.business-cdn-8k.com/live/3169f822cf0e/112a2eb58f/544456.m3u8'
       rtmp_base:
-        description: 'رابط RTMP لفيسبوك (rtmps://live-api-s.facebook.com:443/rtmp)'
+        description: 'رابط RTMP لـ OK.ru'
         required: true
-        default: 'rtmps://live-api-s.facebook.com:443/rtmp'
+        default: 'rtmp://vsu.okcdn.ru/input'
       stream_key:
-        description: 'مفتاح البث الدائم لفيسبوك'
+        description: 'مفتاح البث'
         required: true
-        default: 'FB-XXXXXXXXXXXXXX'
+        default: 'مفتاح_البث_الخاص_بك'
       logo_url:
-        description: 'رابط صورة الشعار (اختياري، اتركه فارغاً إن لم ترد شعار)'
+        description: 'رابط صورة الشعار'
         required: false
-        default: ''
+        default: 'https://e.top4top.io/p_3818nc1gm1.png'
 
 jobs:
-  stream_fb_max_with_logo:
+  ok_ru_best_quality:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
       - name: تثبيت ffmpeg
         run: sudo apt update && sudo apt install -y ffmpeg
 
-      - name: بث فيسبوك عالي الجودة مع شعار (إن وجد)
+      - name: بث OK.ru بأقصى جودة مع شعار
         env:
           SOURCE_URL: ${{ inputs.source_url }}
           RTMP_BASE: ${{ inputs.rtmp_base }}
@@ -37,39 +37,37 @@ jobs:
         run: |
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
 
-          # تحميل الشعار مرة واحدة فقط
+          # تحميل الشعار مرة واحدة
           if [ -n "$LOGO_URL" ]; then
-            echo "تحميل صورة الشعار..."
-            curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الصورة"; exit 1; }
+            echo "تحميل الشعار..."
+            curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الشعار"; exit 1; }
           fi
 
-          # حلقة لا نهائية لإعادة التشغيل عند التوقف
+          # حلقة إعادة التشغيل التلقائي
           while true; do
-            echo "بدء/إعادة تشغيل البث..."
+            echo "بدء / إعادة تشغيل البث..."
 
             if [ -n "$LOGO_URL" ]; then
-              echo "بث مع الشعار (يملأ الشاشة بالكامل)..."
               ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
                 -filter_complex \
                   "[0:v]scale=1920:1080,setsar=1[bg]; \
                    movie=logo.png,scale=1920:1080:flags=fast_bilinear,setsar=1,format=rgba[logo]; \
                    [bg][logo]overlay=0:0:eof_action=repeat,format=yuv420p[v]" \
                 -c:v libx264 -preset ultrafast -tune zerolatency \
-                -b:v 9000k -maxrate 9500k -bufsize 18000k \
+                -b:v 8000k -maxrate 8500k -bufsize 16000k \
                 -r 60 -g 120 \
                 -c:a aac -b:a 192k -ar 48000 -ac 2 \
                 -map "[v]" -map 0:a \
                 -f flv "$OUTPUT_URL" || true
             else
-              echo "بث بدون شعار..."
               ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
                 -c:v libx264 -preset ultrafast -tune zerolatency \
-                -b:v 9000k -maxrate 9500k -bufsize 18000k \
+                -b:v 8000k -maxrate 8500k -bufsize 16000k \
                 -s 1920x1080 -r 60 -g 120 \
                 -c:a aac -b:a 192k -ar 48000 -ac 2 \
                 -f flv "$OUTPUT_URL" || true
             fi
 
-            echo "انقطع البث. إعادة المحاولة بعد 5 ثوانٍ..."
+            echo "انقطع البث. إعادة التشغيل بعد 5 ثوانٍ..."
             sleep 5
           done
