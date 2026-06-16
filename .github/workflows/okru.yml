@@ -1,34 +1,37 @@
-name: "بث OK.ru - 1080p 60fps (9000kbps) + شعار + 24 ساعة"
+name: "بث OK.ru - 1080p 60fps + شعار + إعادة تشغيل ذاتي 24 ساعة"
 
 on:
   workflow_dispatch:
     inputs:
       source_url:
-        description: 'رابط المصدر (4K HLS)'
+        description: 'رابط المصدر'
         required: true
         default: 'http://tv.business-cdn-8k.com/live/3169f822cf0e/112a2eb58f/544456.m3u8'
       rtmp_base:
-        description: 'رابط RTMP لـ OK.ru'
+        description: 'رابط RTMP OK.ru'
         required: true
         default: 'rtmp://vsu.okcdn.ru/input'
       stream_key:
         description: 'مفتاح البث'
         required: true
-        default: 'مفتاح_البث_الخاص_بك'
+        default: 'مفتاحك_هنا'
       logo_url:
-        description: 'رابط صورة الشعار'
+        description: 'رابط الشعار'
         required: false
         default: 'https://e.top4top.io/p_3818nc1gm1.png'
 
 jobs:
-  ok_ru_1080p_loop:
+  ok_ru_loop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    # 👇 الصلاحية الضرورية لإعادة تشغيل الـ workflow
+    permissions:
+      actions: write
     steps:
       - name: تثبيت ffmpeg
         run: sudo apt update && sudo apt install -y ffmpeg
 
-      - name: بث مستمر مع إعادة تشغيل تلقائية
+      - name: بث مستمر مع إعادة تشغيل ذاتية
         env:
           SOURCE_URL: ${{ inputs.source_url }}
           RTMP_BASE: ${{ inputs.rtmp_base }}
@@ -36,23 +39,28 @@ jobs:
           LOGO_URL: ${{ inputs.logo_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          WORKFLOW_ID: ${{ github.workflow }}
           REF: ${{ github.ref_name }}
+          # اسم ملف الـ workflow نفسه (غيّره إذا كان مختلفًا)
+          WORKFLOW_FILE: 'okru.yml'
         run: |
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
-          SELF_RUN_URL="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/dispatches"
+          # رابط API الصحيح لإعادة التشغيل
+          DISPATCH_URL="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches"
 
           if [ -n "$LOGO_URL" ]; then
             echo "تحميل الشعار..."
-            curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الشعار"; exit 1; }
+            curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل التحميل"; exit 1; }
           fi
 
-          MAX_DURATION=$((5*3600 + 40*60))
+          MAX_CYCLE=$((5*3600 + 40*60))   # 5 ساعات و40 دقيقة
+          RESTART_INTERVAL=600             # إعادة تشغيل كل 10 دقائق لالتقاط البث
 
           while true; do
             echo "بدء / إعادة تشغيل البث..."
             START_TIME=$(date +%s)
+            CYCLE_START=$(date +%s)
 
+            # تشغيل ffmpeg في الخلفية
             if [ -n "$LOGO_URL" ]; then
               ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
                 -filter_complex \
@@ -78,20 +86,33 @@ jobs:
             while true; do
               sleep 10
               NOW=$(date +%s)
-              ELAPSED=$((NOW - START_TIME))
-              if [ $ELAPSED -ge $MAX_DURATION ]; then
-                echo "اقترب انتهاء الدورة. إعادة تشغيل الـ workflow..."
+              CYCLE_ELAPSED=$((NOW - CYCLE_START))
+
+              # 1- إعادة تشغيل كل 10 دقائق لضمان البث المباشر
+              if [ $CYCLE_ELAPSED -ge $RESTART_INTERVAL ]; then
+                echo "إعادة التشغيل الدوري..."
                 kill $FFMPEG_PID 2>/dev/null || true
+                break
+              fi
+
+              # 2- إعادة تشغيل الـ workflow بالكامل قبل انتهاء الـ 6 ساعات
+              TOTAL_ELAPSED=$((NOW - START_TIME))
+              if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
+                echo "تشغيل دورة جديدة عبر API..."
+                kill $FFMPEG_PID 2>/dev/null || true
+                # استدعاء إعادة التشغيل
                 curl -X POST \
                   -H "Authorization: token $GITHUB_TOKEN" \
                   -H "Accept: application/vnd.github.v3+json" \
-                  "$SELF_RUN_URL" \
+                  "$DISPATCH_URL" \
                   -d "{\"ref\":\"$REF\",\"inputs\":{\"source_url\":\"$SOURCE_URL\",\"rtmp_base\":\"$RTMP_BASE\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\"}}"
-                echo "تم طلب دورة جديدة. إنهاء."
+                echo "تم الطلب. إنهاء الدورة الحالية."
                 exit 0
               fi
+
+              # 3- إذا توقف ffmpeg فجأة
               if ! kill -0 $FFMPEG_PID 2>/dev/null; then
-                echo "توقف ffmpeg. إعادة تشغيله..."
+                echo "ffmpeg توقف. إعادة تشغيل..."
                 break
               fi
             done
