@@ -1,4 +1,4 @@
-name: "بث OK.ru - 2K 60fps (12Mbps) + شعار + إعادة تشغيل تلقائي 24 ساعة"
+name: "بث OK.ru - 1080p 60fps (9000kbps) + شعار + 24 ساعة"
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ on:
         default: 'https://e.top4top.io/p_3818nc1gm1.png'
 
 jobs:
-  ok_ru_2k_loop:
+  ok_ru_1080p_loop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -42,7 +42,6 @@ jobs:
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
           SELF_RUN_URL="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/dispatches"
 
-          # تحميل الشعار مرة واحدة
           if [ -n "$LOGO_URL" ]; then
             echo "تحميل الشعار..."
             curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل تحميل الشعار"; exit 1; }
@@ -51,27 +50,27 @@ jobs:
           MAX_DURATION=$((5*3600 + 40*60))
 
           while true; do
-            echo "بدء / إعادة تشغيل البث في هذه الدورة..."
+            echo "بدء / إعادة تشغيل البث..."
             START_TIME=$(date +%s)
 
             if [ -n "$LOGO_URL" ]; then
               ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
                 -filter_complex \
-                  "[0:v]scale=2560:1440,setsar=1[bg]; \
-                   movie=logo.png,scale=2560:1440:flags=fast_bilinear,setsar=1,format=rgba[logo]; \
+                  "[0:v]scale=1920:1080,setsar=1[bg]; \
+                   movie=logo.png,scale=1920:1080:flags=fast_bilinear,setsar=1,format=rgba[logo]; \
                    [bg][logo]overlay=0:0:eof_action=repeat,format=yuv420p[v]" \
                 -c:v libx264 -preset ultrafast -tune zerolatency \
-                -b:v 12000k -maxrate 13000k -bufsize 24000k \
+                -b:v 9000k -maxrate 9500k -bufsize 18000k \
                 -r 60 -g 120 \
-                -c:a aac -b:a 256k -ar 48000 -ac 2 \
+                -c:a aac -b:a 192k -ar 48000 -ac 2 \
                 -map "[v]" -map 0:a \
                 -f flv "$OUTPUT_URL" &
             else
               ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
                 -c:v libx264 -preset ultrafast -tune zerolatency \
-                -b:v 12000k -maxrate 13000k -bufsize 24000k \
-                -s 2560x1440 -r 60 -g 120 \
-                -c:a aac -b:a 256k -ar 48000 -ac 2 \
+                -b:v 9000k -maxrate 9500k -bufsize 18000k \
+                -s 1920x1080 -r 60 -g 120 \
+                -c:a aac -b:a 192k -ar 48000 -ac 2 \
                 -f flv "$OUTPUT_URL" &
             fi
             FFMPEG_PID=$!
@@ -81,14 +80,14 @@ jobs:
               NOW=$(date +%s)
               ELAPSED=$((NOW - START_TIME))
               if [ $ELAPSED -ge $MAX_DURATION ]; then
-                echo "اقترب انتهاء الدورة (5h40min). جارٍ إيقاف البث الحالي وإعادة تشغيل الـ workflow..."
+                echo "اقترب انتهاء الدورة. إعادة تشغيل الـ workflow..."
                 kill $FFMPEG_PID 2>/dev/null || true
                 curl -X POST \
                   -H "Authorization: token $GITHUB_TOKEN" \
                   -H "Accept: application/vnd.github.v3+json" \
                   "$SELF_RUN_URL" \
                   -d "{\"ref\":\"$REF\",\"inputs\":{\"source_url\":\"$SOURCE_URL\",\"rtmp_base\":\"$RTMP_BASE\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\"}}"
-                echo "تم طلب دورة جديدة. إنهاء الدورة الحالية."
+                echo "تم طلب دورة جديدة. إنهاء."
                 exit 0
               fi
               if ! kill -0 $FFMPEG_PID 2>/dev/null; then
