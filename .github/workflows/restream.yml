@@ -97,7 +97,6 @@ jobs:
         run: |
           python3 << 'PY' > filter.txt
           import os
-
           g           = int(os.environ.get("GRID",    "10"))
           seed        = int(os.environ.get("SEED",    "987654321"))
           W           = int(os.environ.get("W",       "1920"))
@@ -108,27 +107,21 @@ jobs:
           fps_input   = os.environ.get("FPS",     "original").strip()
           has_overlay = overlay_url not in ("", "none")
           n           = g * g
-
           fps_f = "" if fps_input == "original" else f",fps={fps_input}"
-
           parts = []
-
           if n == 1:
               src_w = int(os.environ.get("SRC_W", str(W)))
               src_h = int(os.environ.get("SRC_H", str(H)))
-
               if W != src_w or H != src_h:
                   main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1{fps_f}"
               else:
                   main_vf = (f"[0:v]setsar=1{fps_f}" if fps_f else "[0:v]setsar=1")
-
               if has_overlay:
                   parts.append(f"{main_vf}[v_main]")
                   parts.append(f"movie=overlay.png,scale={W}:{H}:flags=fast_bilinear,format=rgba[over]")
                   parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
                   parts.append(f"{main_vf},format=yuv420p[out]")
-
           else:
               state = seed & 0xFFFFFFFF
               def rnd():
@@ -139,24 +132,20 @@ jobs:
               for i in range(n - 1, 0, -1):
                   j = rnd() % (i + 1)
                   perm[i], perm[j] = perm[j], perm[i]
-
               parts.append(
                   f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1{fps_f},split={n}" +
                   "".join(f"[s{i}]" for i in range(n))
               )
               for i in range(n):
                   parts.append(f"[s{i}]crop={tw}:{th}:{(i%g)*tw}:{(i//g)*th}[c{i}]")
-
               xin    = "".join(f"[c{perm[o]}]" for o in range(n))
               layout = "|".join(f"{(o%g)*tw}_{(o//g)*th}" for o in range(n))
               parts.append(f"{xin}xstack=inputs={n}:layout={layout}[v_main]")
-
               if has_overlay:
                   parts.append(f"[1:v]scale={W}:{H}:flags=bicubic[over]")
                   parts.append("[v_main][over]overlay=0:0,format=yuv420p[out]")
               else:
                   parts.append("[v_main]format=yuv420p[out]")
-
           print(";".join(parts))
           PY
 
@@ -181,7 +170,6 @@ jobs:
         run: |
           FILTER=$(cat filter.txt)
 
-          # ── Bitrate ──────────────────────────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
             if   [ "$SRC_H" -ge 2160 ]; then VBR="15000k"
             elif [ "$SRC_H" -ge 1440 ]; then VBR="10000k"
@@ -193,29 +181,25 @@ jobs:
             fi
           else
             VBR="$BITRATE"
-            [[ "$VBR" =~ ^[0-9]+$ ]] && VBR="${VBR}k"
+            echo "$VBR" | grep -qE '^[0-9]+$' && VBR="${VBR}k"
           fi
           BUF=$((${VBR%k} * 2))k
 
-          # ── Deblock ──────────────────────────────────────────────
           if   [ "$SRC_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
           elif [ "$SRC_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
           elif [ "$SRC_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
           else                              DEBLOCK="deblock=3,3"
           fi
 
-          # ── Keyframe (2 ثانية) ───────────────────────────────────
           if [ "$FPS" = "original" ] || [ -z "$FPS" ]; then
             GVAL=40
           else
-            GVAL=$(( $FPS * 2 ))
+            GVAL=$(( FPS * 2 ))
           fi
 
-          # ── Loop ─────────────────────────────────────────────────
           LOOP_ARG=""
           [ "$IS_LOOP" = "true" ] && LOOP_ARG="-stream_loop -1"
 
-          # ── Overlay ──────────────────────────────────────────────
           INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png
@@ -224,7 +208,6 @@ jobs:
             fi
           fi
 
-          # ── Audio fallback ────────────────────────────────────────
           if [ "$HAVE_AUDIO" = "false" ]; then
             FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
             MAP_AUDIO="-map [aud_out]"
@@ -232,42 +215,35 @@ jobs:
             MAP_AUDIO="-map 0:a:0?"
           fi
 
-          # ── Auto-restart ──────────────────────────────────────────
           WORKFLOW_START=$(date +%s)
           MAX_RUNTIME=$((335 * 60))
 
           dispatch_new_run() {
             echo "==> Dispatching new workflow run..."
-            PAYLOAD=$(python3 -c "
-import json, os
-print(json.dumps({
-    'ref': os.environ.get('REF', 'main'),
-    'inputs': {
-        'source_url':  os.environ.get('SRC', ''),
-        'referer':     os.environ.get('REFERER', ''),
-        'rtmp_url':    os.environ.get('RTMP', ''),
-        'stream_key':  os.environ.get('KEY', ''),
-        'seed':        os.environ.get('SEED', '987654321'),
-        'grid':        os.environ.get('GRID', '10'),
-        'quality':     os.environ.get('QUALITY', 'original'),
-        'fps':         os.environ.get('FPS', 'original'),
-        'bitrate':     os.environ.get('BITRATE', 'auto'),
-        'is_loop':     os.environ.get('IS_LOOP', 'false'),
-        'overlay_url': os.environ.get('OVERLAY_URL', 'none'),
-    }
-}))
-")
+            PAYLOAD=$(jq -n \
+              --arg ref     "$REF" \
+              --arg src     "$SRC" \
+              --arg referer "$REFERER" \
+              --arg rtmp    "$RTMP" \
+              --arg key     "$KEY" \
+              --arg seed    "$SEED" \
+              --arg grid    "$GRID" \
+              --arg quality "$QUALITY" \
+              --arg fps     "$FPS" \
+              --arg bitrate "$BITRATE" \
+              --arg is_loop "$IS_LOOP" \
+              --arg overlay "$OVERLAY_URL" \
+              '{ref:$ref,inputs:{source_url:$src,referer:$referer,rtmp_url:$rtmp,stream_key:$key,seed:$seed,grid:$grid,quality:$quality,fps:$fps,bitrate:$bitrate,is_loop:$is_loop,overlay_url:$overlay}}')
             curl -s -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
               -d "$PAYLOAD" \
-              && echo "==> Dispatch OK ✓" \
+              && echo "==> Dispatch OK" \
               || echo "==> Dispatch FAILED"
           }
 
-          # ── Stream loop ───────────────────────────────────────────
           while true; do
             ffmpeg -hide_banner -loglevel error \
               -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 \
