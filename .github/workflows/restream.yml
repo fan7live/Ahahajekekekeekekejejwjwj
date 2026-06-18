@@ -4,14 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       source_url:  { description: 'Source URL', required: true }
-      referer:     { description: 'Referer', required: false }
+      referer:     { description: 'Referer', required: false, default: '' }
       rtmp_url:    { description: 'RTMP URL', required: true }
       stream_key:  { description: 'Stream Key', required: true }
       seed:        { description: 'Shared secret', required: true, default: '987654321' }
       grid:        { description: 'Grid', required: true, default: '10' }
-      quality:     { description: 'Target Quality', required: true, default: 'original' }
+      quality:     { description: 'Quality (original/144/240/360/480/720/1080/1440/2160)', required: true, default: 'original' }
+      fps:         { description: 'FPS (original/15/24/30/60/120)', required: true, default: 'original' }
+      bitrate:     { description: 'Video Bitrate (auto or e.g. 6000k)', required: true, default: 'auto' }
       is_loop:     { description: 'Loop Video (true/false)', required: true, default: 'false' }
-      overlay_url: { description: 'Overlay Image URL (Optional)', required: false, default: 'none' }
+      overlay_url: { description: 'Overlay Image URL', required: false, default: 'none' }
+
+permissions:
+  actions: write
 
 jobs:
   restream:
@@ -20,8 +25,12 @@ jobs:
     steps:
       - run: echo "::add-mask::${{ inputs.stream_key }}"
 
-      - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 curl
+      - name: Install FFmpeg
+        run: |
+          curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
 
       - name: Probe source and Set Dimensions
         env:
@@ -43,9 +52,9 @@ jobs:
             SRC_W=1920; SRC_H=1080
           fi
 
-          if [ "$QUAL" != "original" ]; then
-             SRC_H=$QUAL
-             SRC_W=$(( (SRC_H * 16) / 9 ))
+          if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
+            SRC_H="$QUAL"
+            SRC_W=$(( (SRC_H * 16) / 9 ))
           fi
 
           HAS_AUD=$(ffprobe -v error \
@@ -55,69 +64,63 @@ jobs:
             -show_entries stream=index \
             -of csv=p=0 \
             "$SRC" | head -1)
-
-          if [ -z "$HAS_AUD" ]; then
-            echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
-          else
-            echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
-          fi
+          [ -z "$HAS_AUD" ] && echo "HAVE_AUDIO=false" >> "$GITHUB_ENV" || echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
 
           G=${{ inputs.grid }}
           TW=$(( (SRC_W / G) / 4 * 4 ))
           TH=$(( (SRC_H / G) / 4 * 4 ))
-
-          if [ "$TW" -eq 0 ]; then TW=4; fi
-          if [ "$TH" -eq 0 ]; then TH=4; fi
-
+          [ "$TW" -eq 0 ] && TW=4
+          [ "$TH" -eq 0 ] && TH=4
           W=$((TW * G))
           H=$((TH * G))
-          echo "Source/Target: ${SRC_W}x${SRC_H} -> ${W}x${H}, tile=${TW}x${TH}"
 
+          echo "Target: ${W}x${H} | tile=${TW}x${TH}"
           echo "SRC_W=$SRC_W" >> "$GITHUB_ENV"
           echo "SRC_H=$SRC_H" >> "$GITHUB_ENV"
-          echo "W=$W" >> "$GITHUB_ENV"
-          echo "H=$H" >> "$GITHUB_ENV"
-          echo "TW=$TW" >> "$GITHUB_ENV"
-          echo "TH=$TH" >> "$GITHUB_ENV"
+          echo "W=$W"         >> "$GITHUB_ENV"
+          echo "H=$H"         >> "$GITHUB_ENV"
+          echo "TW=$TW"       >> "$GITHUB_ENV"
+          echo "TH=$TH"       >> "$GITHUB_ENV"
 
       - name: Build filter
         env:
-          GRID: ${{ inputs.grid }}
-          SEED: ${{ inputs.seed }}
+          GRID:    ${{ inputs.grid }}
+          SEED:    ${{ inputs.seed }}
           OVERLAY: ${{ inputs.overlay_url }}
-          W: ${{ env.W }}
-          H: ${{ env.H }}
-          TW: ${{ env.TW }}
-          TH: ${{ env.TH }}
-          SRC_W: ${{ env.SRC_W }}
-          SRC_H: ${{ env.SRC_H }}
+          FPS:     ${{ inputs.fps }}
+          W:       ${{ env.W }}
+          H:       ${{ env.H }}
+          TW:      ${{ env.TW }}
+          TH:      ${{ env.TH }}
+          SRC_W:   ${{ env.SRC_W }}
+          SRC_H:   ${{ env.SRC_H }}
         run: |
           python3 << 'PY' > filter.txt
           import os
-          g = int(os.environ.get("GRID", "10"))
-          seed = int(os.environ.get("SEED", "987654321"))
-          W = int(os.environ.get("W", "1920"))
-          H = int(os.environ.get("H", "1080"))
-          tw = int(os.environ.get("TW", "192"))
-          th = int(os.environ.get("TH", "108"))
+
+          g           = int(os.environ.get("GRID",    "10"))
+          seed        = int(os.environ.get("SEED",    "987654321"))
+          W           = int(os.environ.get("W",       "1920"))
+          H           = int(os.environ.get("H",       "1080"))
+          tw          = int(os.environ.get("TW",      "192"))
+          th          = int(os.environ.get("TH",      "108"))
           overlay_url = os.environ.get("OVERLAY", "none").strip()
-          has_overlay = (overlay_url != "" and overlay_url != "none")
-          n = g * g
+          fps_input   = os.environ.get("FPS",     "original").strip()
+          has_overlay = overlay_url not in ("", "none")
+          n           = g * g
+
+          fps_f = "" if fps_input == "original" else f",fps={fps_input}"
 
           parts = []
+
           if n == 1:
-              # ==============================================================
-              # بث نقي 1x1
-              # fps=30 بدل fps=20 — يجبر Kick و باقي المنصات تتعرف على 1080p
-              # fps=20 غير قياسي وKick يصنفه كـ 720p تلقائياً
-              # ==============================================================
               src_w = int(os.environ.get("SRC_W", str(W)))
               src_h = int(os.environ.get("SRC_H", str(H)))
 
               if W != src_w or H != src_h:
-                  main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1,fps=30"
+                  main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1{fps_f}"
               else:
-                  main_vf = f"[0:v]setsar=1,fps=30"
+                  main_vf = (f"[0:v]setsar=1{fps_f}" if fps_f else "[0:v]setsar=1")
 
               if has_overlay:
                   parts.append(f"{main_vf}[v_main]")
@@ -125,10 +128,8 @@ jobs:
                   parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
                   parts.append(f"{main_vf},format=yuv420p[out]")
+
           else:
-              # ==============================================================
-              # بث مقسم n>1 — لم يُمس شيء
-              # ==============================================================
               state = seed & 0xFFFFFFFF
               def rnd():
                   global state
@@ -139,10 +140,14 @@ jobs:
                   j = rnd() % (i + 1)
                   perm[i], perm[j] = perm[j], perm[i]
 
-              parts.append(f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1,fps=20,split={n}" + "".join(f"[s{i}]" for i in range(n)))
+              parts.append(
+                  f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1{fps_f},split={n}" +
+                  "".join(f"[s{i}]" for i in range(n))
+              )
               for i in range(n):
                   parts.append(f"[s{i}]crop={tw}:{th}:{(i%g)*tw}:{(i//g)*th}[c{i}]")
-              xin = "".join(f"[c{perm[o]}]" for o in range(n))
+
+              xin    = "".join(f"[c{perm[o]}]" for o in range(n))
               layout = "|".join(f"{(o%g)*tw}_{(o//g)*th}" for o in range(n))
               parts.append(f"{xin}xstack=inputs={n}:layout={layout}[v_main]")
 
@@ -157,35 +162,60 @@ jobs:
 
       - name: Stream
         env:
-          SRC: ${{ inputs.source_url }}
-          RTMP: ${{ inputs.rtmp_url }}
-          KEY: ${{ inputs.stream_key }}
-          REFERER: ${{ inputs.referer }}
-          IS_LOOP: ${{ inputs.is_loop }}
+          SRC:         ${{ inputs.source_url }}
+          RTMP:        ${{ inputs.rtmp_url }}
+          KEY:         ${{ inputs.stream_key }}
+          REFERER:     ${{ inputs.referer }}
+          IS_LOOP:     ${{ inputs.is_loop }}
           OVERLAY_URL: ${{ inputs.overlay_url }}
-          GRID: ${{ inputs.grid }}
-          SRC_H: ${{ env.SRC_H }}
-          HAVE_AUDIO: ${{ env.HAVE_AUDIO }}
+          GRID:        ${{ inputs.grid }}
+          SEED:        ${{ inputs.seed }}
+          QUALITY:     ${{ inputs.quality }}
+          FPS:         ${{ inputs.fps }}
+          BITRATE:     ${{ inputs.bitrate }}
+          SRC_H:       ${{ env.SRC_H }}
+          HAVE_AUDIO:  ${{ env.HAVE_AUDIO }}
+          GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          REPO:        ${{ github.repository }}
+          REF:         ${{ github.ref_name }}
         run: |
           FILTER=$(cat filter.txt)
 
-          if [ "$SRC_H" -ge 1080 ]; then
-            VBR="6000k"
-            DEBLOCK="deblock=1,1"
-          elif [ "$SRC_H" -ge 720 ]; then
-            VBR="3500k"
-            DEBLOCK="deblock=2,2"
+          # ── Bitrate ──────────────────────────────────────────────
+          if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
+            if   [ "$SRC_H" -ge 2160 ]; then VBR="15000k"
+            elif [ "$SRC_H" -ge 1440 ]; then VBR="10000k"
+            elif [ "$SRC_H" -ge 1080 ]; then VBR="6000k"
+            elif [ "$SRC_H" -ge 720  ]; then VBR="3500k"
+            elif [ "$SRC_H" -ge 480  ]; then VBR="2000k"
+            elif [ "$SRC_H" -ge 360  ]; then VBR="1000k"
+            else                              VBR="600k"
+            fi
           else
-            VBR="2000k"
-            DEBLOCK="deblock=3,3"
+            VBR="$BITRATE"
+            [[ "$VBR" =~ ^[0-9]+$ ]] && VBR="${VBR}k"
           fi
           BUF=$((${VBR%k} * 2))k
 
-          LOOP_ARG=""
-          if [ "$IS_LOOP" == "true" ]; then
-            LOOP_ARG="-stream_loop -1"
+          # ── Deblock ──────────────────────────────────────────────
+          if   [ "$SRC_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
+          elif [ "$SRC_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
+          elif [ "$SRC_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
+          else                              DEBLOCK="deblock=3,3"
           fi
 
+          # ── Keyframe (2 ثانية) ───────────────────────────────────
+          if [ "$FPS" = "original" ] || [ -z "$FPS" ]; then
+            GVAL=40
+          else
+            GVAL=$(( $FPS * 2 ))
+          fi
+
+          # ── Loop ─────────────────────────────────────────────────
+          LOOP_ARG=""
+          [ "$IS_LOOP" = "true" ] && LOOP_ARG="-stream_loop -1"
+
+          # ── Overlay ──────────────────────────────────────────────
           INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png
@@ -194,13 +224,50 @@ jobs:
             fi
           fi
 
-          if [ "$HAVE_AUDIO" == "false" ]; then
+          # ── Audio fallback ────────────────────────────────────────
+          if [ "$HAVE_AUDIO" = "false" ]; then
             FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
             MAP_AUDIO="-map [aud_out]"
           else
             MAP_AUDIO="-map 0:a:0?"
           fi
 
+          # ── Auto-restart ──────────────────────────────────────────
+          WORKFLOW_START=$(date +%s)
+          MAX_RUNTIME=$((335 * 60))
+
+          dispatch_new_run() {
+            echo "==> Dispatching new workflow run..."
+            PAYLOAD=$(python3 -c "
+import json, os
+print(json.dumps({
+    'ref': os.environ.get('REF', 'main'),
+    'inputs': {
+        'source_url':  os.environ.get('SRC', ''),
+        'referer':     os.environ.get('REFERER', ''),
+        'rtmp_url':    os.environ.get('RTMP', ''),
+        'stream_key':  os.environ.get('KEY', ''),
+        'seed':        os.environ.get('SEED', '987654321'),
+        'grid':        os.environ.get('GRID', '10'),
+        'quality':     os.environ.get('QUALITY', 'original'),
+        'fps':         os.environ.get('FPS', 'original'),
+        'bitrate':     os.environ.get('BITRATE', 'auto'),
+        'is_loop':     os.environ.get('IS_LOOP', 'false'),
+        'overlay_url': os.environ.get('OVERLAY_URL', 'none'),
+    }
+}))
+")
+            curl -s -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
+              -d "$PAYLOAD" \
+              && echo "==> Dispatch OK ✓" \
+              || echo "==> Dispatch FAILED"
+          }
+
+          # ── Stream loop ───────────────────────────────────────────
           while true; do
             ffmpeg -hide_banner -loglevel error \
               -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 \
@@ -212,9 +279,28 @@ jobs:
               -c:v libx264 -preset ultrafast -tune zerolatency \
               -threads 2 -pix_fmt yuv420p \
               -x264-params "${DEBLOCK}:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none" \
-              -b:v $VBR -maxrate $VBR -bufsize $BUF -g 40 \
+              -b:v $VBR -maxrate $VBR -bufsize $BUF -g $GVAL \
               -c:a aac -b:a 128k -ar 44100 -ac 2 \
               -max_muxing_queue_size 1024 \
-              -f flv "$RTMP/$KEY" || true
+              -f flv "$RTMP/$KEY" &
+            FFMPEG_PID=$!
+
+            while kill -0 $FFMPEG_PID 2>/dev/null; do
+              sleep 10
+              if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
+                kill $FFMPEG_PID 2>/dev/null || true
+                wait $FFMPEG_PID 2>/dev/null || true
+                dispatch_new_run
+                exit 0
+              fi
+            done
+
+            wait $FFMPEG_PID 2>/dev/null || true
+
+            if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
+              dispatch_new_run
+              exit 0
+            fi
+
             sleep 5
           done
