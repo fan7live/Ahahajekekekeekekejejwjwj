@@ -25,36 +25,37 @@ jobs:
     steps:
       - run: echo "::add-mask::${{ inputs.stream_key }}"
 
-      - name: Install FFmpeg
-        run: |
-          curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
-          tar xf ffmpeg.tar.xz
-          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
-          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
-
-      - name: Probe source and Set Dimensions
+      - name: Probe source
         env:
-          SRC: ${{ inputs.source_url }}
+          SRC:     ${{ inputs.source_url }}
           REFERER: ${{ inputs.referer }}
-          QUAL: ${{ inputs.quality }}
+          QUAL:    ${{ inputs.quality }}
         run: |
           UA="Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
-          DIMS=$(ffprobe -v error \
+          echo "==> Probing: $SRC"
+
+          DIMS=$(ffprobe -v warning \
             -user_agent "$UA" \
             ${REFERER:+-headers "Referer: $REFERER\r\n"} \
             -select_streams v:0 \
             -show_entries stream=width,height \
             -of csv=p=0:s=x \
             "$SRC" | head -1)
+
           SRC_W=$(echo "$DIMS" | cut -dx -f1)
           SRC_H=$(echo "$DIMS" | cut -dx -f2)
-          if [ -z "$SRC_W" ] || [ -z "$SRC_H" ]; then
+
+          if [ -z "$SRC_W" ] || [ -z "$SRC_H" ] || [ "$SRC_W" = "0" ]; then
+            echo "Warning: dimension probe failed, defaulting to 1920x1080"
             SRC_W=1920; SRC_H=1080
+          else
+            echo "==> Detected: ${SRC_W}x${SRC_H}"
           fi
 
           if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
             SRC_H="$QUAL"
             SRC_W=$(( (SRC_H * 16) / 9 ))
+            echo "==> Quality override -> ${SRC_W}x${SRC_H}"
           fi
 
           HAS_AUD=$(ffprobe -v error \
@@ -64,7 +65,14 @@ jobs:
             -show_entries stream=index \
             -of csv=p=0 \
             "$SRC" | head -1)
-          [ -z "$HAS_AUD" ] && echo "HAVE_AUDIO=false" >> "$GITHUB_ENV" || echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
+
+          if [ -z "$HAS_AUD" ]; then
+            echo "==> No audio — will generate silence"
+            echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
+          else
+            echo "==> Audio track found"
+            echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
+          fi
 
           G=${{ inputs.grid }}
           TW=$(( (SRC_W / G) / 4 * 4 ))
@@ -74,7 +82,8 @@ jobs:
           W=$((TW * G))
           H=$((TH * G))
 
-          echo "Target: ${W}x${H} | tile=${TW}x${TH}"
+          echo "==> Canvas: ${W}x${H} | tile: ${TW}x${TH} | grid: ${G}x${G}"
+
           echo "SRC_W=$SRC_W" >> "$GITHUB_ENV"
           echo "SRC_H=$SRC_H" >> "$GITHUB_ENV"
           echo "W=$W"         >> "$GITHUB_ENV"
@@ -148,6 +157,7 @@ jobs:
                   parts.append("[v_main]format=yuv420p[out]")
           print(";".join(parts))
           PY
+          echo "==> Filter (preview): $(head -c 250 filter.txt)"
 
       - name: Stream
         env:
@@ -170,6 +180,14 @@ jobs:
         run: |
           FILTER=$(cat filter.txt)
 
+          echo "==============================="
+          echo " Source  : $SRC"
+          echo " Platform: $RTMP"
+          echo " Size    : ${SRC_H}p | FPS: $FPS | Bitrate: $BITRATE"
+          echo " Grid    : $GRID | Loop: $IS_LOOP | Audio: $HAVE_AUDIO"
+          echo "==============================="
+
+          # ── Bitrate ─────────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
             if   [ "$SRC_H" -ge 2160 ]; then VBR="15000k"
             elif [ "$SRC_H" -ge 1440 ]; then VBR="10000k"
@@ -184,42 +202,41 @@ jobs:
             echo "$VBR" | grep -qE '^[0-9]+$' && VBR="${VBR}k"
           fi
           BUF=$((${VBR%k} * 2))k
+          echo "==> VBR: $VBR | BUF: $BUF"
 
+          # ── Deblock ─────────────────────────────
           if   [ "$SRC_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
           elif [ "$SRC_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
           elif [ "$SRC_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
           else                              DEBLOCK="deblock=3,3"
           fi
 
+          # ── Keyframe ────────────────────────────
           if [ "$FPS" = "original" ] || [ -z "$FPS" ]; then
             GVAL=40
           else
             GVAL=$(( FPS * 2 ))
           fi
 
-          LOOP_ARG=""
-          [ "$IS_LOOP" = "true" ] && LOOP_ARG="-stream_loop -1"
-
-          INPUT_ARGS="-thread_queue_size 2048 $LOOP_ARG -i $SRC"
+          # ── Overlay ─────────────────────────────
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
-            curl -sL "$OVERLAY_URL" -o overlay.png
-            if [ "$GRID" -gt 1 ]; then
-              INPUT_ARGS="$INPUT_ARGS -thread_queue_size 1024 -loop 1 -i overlay.png"
-            fi
+            echo "==> Downloading overlay..."
+            curl -sL "$OVERLAY_URL" -o overlay.png \
+              && echo "==> Overlay OK ($(du -sh overlay.png | cut -f1))" \
+              || echo "==> Overlay download FAILED"
           fi
 
+          # ── Audio fix ───────────────────────────
           if [ "$HAVE_AUDIO" = "false" ]; then
             FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
-            MAP_AUDIO="-map [aud_out]"
-          else
-            MAP_AUDIO="-map 0:a:0?"
           fi
 
+          # ── Auto-restart ────────────────────────
           WORKFLOW_START=$(date +%s)
           MAX_RUNTIME=$((335 * 60))
 
           dispatch_new_run() {
-            echo "==> Dispatching new workflow run..."
+            echo "==> [$(date '+%H:%M:%S')] Dispatching new workflow run..."
             PAYLOAD=$(jq -n \
               --arg ref     "$REF" \
               --arg src     "$SRC" \
@@ -240,30 +257,47 @@ jobs:
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
               -d "$PAYLOAD" \
-              && echo "==> Dispatch OK" \
-              || echo "==> Dispatch FAILED"
+              && echo "==> Dispatch OK ✓" \
+              || echo "==> Dispatch FAILED — consider using a PAT secret"
           }
 
+          # ── Build FFmpeg command as array ────────
+          # (array يضمن صحة كل argument حتى لو يحتوي مسافات)
+          declare -a FF
+          FF=(ffmpeg -hide_banner -loglevel warning)
+          FF+=(-fflags +genpts)
+          FF+=(-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5)
+          FF+=(-user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
+          [ -n "$REFERER" ] && FF+=(-headers "Referer: $REFERER\r\n")
+          FF+=(-thread_queue_size 2048)
+          [ "$IS_LOOP" = "true" ] && FF+=(-re -stream_loop -1)
+          FF+=(-i "$SRC")
+          [ -f overlay.png ] && [ "$GRID" -gt 1 ] && FF+=(-thread_queue_size 1024 -loop 1 -i overlay.png)
+          FF+=(-filter_complex "$FILTER")
+          FF+=(-map "[out]")
+          if [ "$HAVE_AUDIO" = "false" ]; then
+            FF+=(-map "[aud_out]")
+          else
+            FF+=(-map "0:a:0?")
+          fi
+          FF+=(-c:v libx264 -preset ultrafast -tune zerolatency)
+          FF+=(-threads 2 -pix_fmt yuv420p)
+          FF+=(-x264-params "${DEBLOCK}:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none")
+          FF+=(-b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF" -g "$GVAL")
+          FF+=(-c:a aac -b:a 128k -ar 44100 -ac 2)
+          FF+=(-max_muxing_queue_size 1024)
+          FF+=(-f flv "$RTMP/$KEY")
+
+          # ── Stream loop ──────────────────────────
           while true; do
-            ffmpeg -hide_banner -loglevel error \
-              -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5 \
-              -user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36" \
-              ${REFERER:+-headers "Referer: $REFERER\r\n"} \
-              $INPUT_ARGS \
-              -filter_complex "$FILTER" \
-              -map "[out]" $MAP_AUDIO \
-              -c:v libx264 -preset ultrafast -tune zerolatency \
-              -threads 2 -pix_fmt yuv420p \
-              -x264-params "${DEBLOCK}:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none" \
-              -b:v $VBR -maxrate $VBR -bufsize $BUF -g $GVAL \
-              -c:a aac -b:a 128k -ar 44100 -ac 2 \
-              -max_muxing_queue_size 1024 \
-              -f flv "$RTMP/$KEY" &
+            echo "==> [$(date '+%H:%M:%S')] Starting FFmpeg..."
+            "${FF[@]}" &
             FFMPEG_PID=$!
 
             while kill -0 $FFMPEG_PID 2>/dev/null; do
               sleep 10
               if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
+                echo "==> [$(date '+%H:%M:%S')] Timeout — switching to new run..."
                 kill $FFMPEG_PID 2>/dev/null || true
                 wait $FFMPEG_PID 2>/dev/null || true
                 dispatch_new_run
@@ -271,12 +305,15 @@ jobs:
               fi
             done
 
-            wait $FFMPEG_PID 2>/dev/null || true
+            wait $FFMPEG_PID
+            EC=$?
+            echo "==> [$(date '+%H:%M:%S')] FFmpeg exited (code: $EC)"
 
             if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
               dispatch_new_run
               exit 0
             fi
 
+            echo "==> Reconnecting in 5s..."
             sleep 5
           done
