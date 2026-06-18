@@ -24,12 +24,15 @@ jobs:
   ok_ru_loop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    # 👇 الصلاحية الضرورية لإعادة تشغيل الـ workflow
     permissions:
       actions: write
     steps:
-      - name: تثبيت ffmpeg
-        run: sudo apt update && sudo apt install -y ffmpeg
+      - name: تثبيت ffmpeg (نسخة ثابتة سريعة)
+        run: |
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          sudo cp ffmpeg-*-static/ffmpeg /usr/local/bin/
+          sudo cp ffmpeg-*-static/ffprobe /usr/local/bin/
 
       - name: بث مستمر مع إعادة تشغيل ذاتية
         env:
@@ -40,11 +43,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
-          # اسم ملف الـ workflow نفسه (غيّره إذا كان مختلفًا)
           WORKFLOW_FILE: 'okru.yml'
         run: |
           OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
-          # رابط API الصحيح لإعادة التشغيل
           DISPATCH_URL="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches"
 
           if [ -n "$LOGO_URL" ]; then
@@ -52,15 +53,14 @@ jobs:
             curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل التحميل"; exit 1; }
           fi
 
-          MAX_CYCLE=$((5*3600 + 40*60))   # 5 ساعات و40 دقيقة
-          RESTART_INTERVAL=600             # إعادة تشغيل كل 10 دقائق لالتقاط البث
+          MAX_CYCLE=$((5*3600 + 40*60))
+          RESTART_INTERVAL=600
 
           while true; do
             echo "بدء / إعادة تشغيل البث..."
             START_TIME=$(date +%s)
             CYCLE_START=$(date +%s)
 
-            # تشغيل ffmpeg في الخلفية
             if [ -n "$LOGO_URL" ]; then
               ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
                 -filter_complex \
@@ -88,19 +88,16 @@ jobs:
               NOW=$(date +%s)
               CYCLE_ELAPSED=$((NOW - CYCLE_START))
 
-              # 1- إعادة تشغيل كل 10 دقائق لضمان البث المباشر
               if [ $CYCLE_ELAPSED -ge $RESTART_INTERVAL ]; then
                 echo "إعادة التشغيل الدوري..."
                 kill $FFMPEG_PID 2>/dev/null || true
                 break
               fi
 
-              # 2- إعادة تشغيل الـ workflow بالكامل قبل انتهاء الـ 6 ساعات
               TOTAL_ELAPSED=$((NOW - START_TIME))
               if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
                 echo "تشغيل دورة جديدة عبر API..."
                 kill $FFMPEG_PID 2>/dev/null || true
-                # استدعاء إعادة التشغيل
                 curl -X POST \
                   -H "Authorization: token $GITHUB_TOKEN" \
                   -H "Accept: application/vnd.github.v3+json" \
@@ -110,7 +107,6 @@ jobs:
                 exit 0
               fi
 
-              # 3- إذا توقف ffmpeg فجأة
               if ! kill -0 $FFMPEG_PID 2>/dev/null; then
                 echo "ffmpeg توقف. إعادة تشغيل..."
                 break
