@@ -44,6 +44,7 @@ jobs:
           UA="Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
           echo "==> Probing: $SRC"
 
+          # استعلام واحد للفيديو والصوت معاً (بدل اثنين)
           PROBE_JSON=$(ffprobe -v error -analyzeduration 3000000 -probesize 2000000 \
             -user_agent "$UA" \
             ${REFERER:+-headers "Referer: $REFERER\r\n"} \
@@ -133,6 +134,7 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
                   perm[i], perm[j] = perm[j], perm[i]
 
               if has_ov:
+                  # اللوجو يُدمج قبل التقسيم ← يظهر صحيح عند العكس
                   parts.append(f"[0:v]{SC}{fps_f}[vb]")
                   parts.append(f"[1:v]{SC},format=rgba[ov]")
                   parts.append("[vb][ov]overlay=0:0:eof_action=repeat[vs]")
@@ -172,9 +174,6 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
         run: |
           FILTER=$(cat filter.txt)
 
-          # استخراج اسم ملف workflow الصحيح
-          WORKFLOW_FILE=$(basename "$GITHUB_WORKFLOW")
-
           echo "==============================="
           echo " Src  : $SRC | ${TGT_H}p"
           echo " RTMP : $RTMP"
@@ -210,17 +209,22 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
           # ── Audio fallback ───────────────────
           [ "$HAVE_AUDIO" = "false" ] && FILTER="anullsrc=r=44100:cl=stereo[aud];$FILTER"
 
-          # ── Auto-restart (بدون jq) ─────────
+          # ── Auto-restart ─────────────────────
           T0=$(date +%s); MAX=$((335 * 60))
 
           dispatch_new_run() {
             echo "==> Dispatching new run..."
-            PAYLOAD="{\"ref\":\"$REF\",\"inputs\":{\"source_url\":\"$SRC\",\"referer\":\"$REFERER\",\"rtmp_url\":\"$RTMP\",\"stream_key\":\"$KEY\",\"seed\":\"$SEED\",\"grid\":\"$GRID\",\"quality\":\"$QUALITY\",\"fps\":\"$FPS\",\"bitrate\":\"$BITRATE\",\"is_loop\":\"$IS_LOOP\",\"overlay_url\":\"$OVERLAY_URL\"}}"
+            PAYLOAD=$(jq -n \
+              --arg ref "$REF" --arg src "$SRC" --arg referer "$REFERER" \
+              --arg rtmp "$RTMP" --arg key "$KEY" --arg seed "$SEED" \
+              --arg grid "$GRID" --arg quality "$QUALITY" --arg fps "$FPS" \
+              --arg bitrate "$BITRATE" --arg is_loop "$IS_LOOP" --arg overlay "$OVERLAY_URL" \
+              '{ref:$ref,inputs:{source_url:$src,referer:$referer,rtmp_url:$rtmp,stream_key:$key,seed:$seed,grid:$grid,quality:$quality,fps:$fps,bitrate:$bitrate,is_loop:$is_loop,overlay_url:$overlay}}')
             curl -s -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
               -H "Content-Type: application/json" \
-              "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_FILE/dispatches" \
+              "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
               -d "$PAYLOAD" && echo "==> Dispatch OK" || echo "==> Dispatch FAILED"
           }
 
@@ -231,8 +235,7 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
           FF+=(-user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
           [ -n "$REFERER" ] && FF+=(-headers "Referer: $REFERER\r\n")
           FF+=(-thread_queue_size 512)
-          FF+=(-re)                                        # حيوي جداً
-          [ "$IS_LOOP" = "true" ] && FF+=(-stream_loop -1)
+          [ "$IS_LOOP" = "true" ] && FF+=(-re -stream_loop -1)
           FF+=(-i "$SRC")
           [ "$HAS_OV" = "true" ] && FF+=(-thread_queue_size 512 -loop 1 -i overlay.png)
           FF+=(-filter_complex "$FILTER" -map "[out]")
