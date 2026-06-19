@@ -27,12 +27,17 @@ jobs:
 
       - name: Install FFmpeg
         run: |
-          sudo apt-get install -y -qq ffmpeg && ffmpeg -version | head -1 && exit 0
-          echo "==> apt failed, using BtbN..."
-          curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o /tmp/ff.tar.xz
-          tar xf /tmp/ff.tar.xz -C /tmp/
-          sudo cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
-          sudo cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          sudo apt-get install -y -qq ffmpeg 2>/dev/null \
+            || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg 2>/dev/null) \
+            || true
+          if ! command -v ffmpeg &>/dev/null; then
+            echo "==> apt failed — downloading BtbN static build..."
+            curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
+              -o /tmp/ff.tar.xz
+            tar xf /tmp/ff.tar.xz -C /tmp/
+            sudo cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+            sudo cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          fi
           ffmpeg -version | head -1
 
       - name: Probe source
@@ -44,37 +49,41 @@ jobs:
           UA="Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
           echo "==> Probing: $SRC"
 
-          # استعلام واحد للفيديو والصوت معاً (بدل اثنين)
-          PROBE_JSON=$(ffprobe -v error -analyzeduration 3000000 -probesize 2000000 \
+          DIMS=$(ffprobe -v error -analyzeduration 3000000 -probesize 2000000 \
             -user_agent "$UA" \
             ${REFERER:+-headers "Referer: $REFERER\r\n"} \
-            -print_format json -show_entries stream=codec_type,width,height \
-            "$SRC" 2>/dev/null)
+            -select_streams v:0 \
+            -show_entries stream=width,height \
+            -of csv=p=0:s=x \
+            "$SRC" | head -1)
 
-          PARSED=$(echo "${PROBE_JSON:-{}}" | python3 -c "import sys,json
-try:
-    d=json.load(sys.stdin); s=d.get('streams',[])
-    v=next((x for x in s if x.get('codec_type')=='video'),{})
-    a=any(x.get('codec_type')=='audio' for x in s)
-    print(v.get('width',1920),v.get('height',1080),'true' if a else 'false')
-except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
+          OW=$(echo "$DIMS" | cut -dx -f1)
+          OH=$(echo "$DIMS" | cut -dx -f2)
+          if [ -z "$OW" ] || [ "$OW" = "0" ]; then
+            OW=1920; OH=1080
+            echo "Warning: probe failed, using 1920x1080"
+          else
+            echo "==> Detected: ${OW}x${OH}"
+          fi
 
-          OW=$(echo "$PARSED" | awk '{print $1}')
-          OH=$(echo "$PARSED" | awk '{print $2}')
-          HAS_AUD=$(echo "$PARSED" | awk '{print $3}')
-          [ -z "$OW" ] || [ "$OW" = "0" ] && { OW=1920; OH=1080; HAS_AUD=true; }
-          echo "==> Source: ${OW}x${OH} | Audio: $HAS_AUD"
+          HAS_AUD=$(ffprobe -v error -analyzeduration 3000000 -probesize 2000000 \
+            -user_agent "$UA" \
+            ${REFERER:+-headers "Referer: $REFERER\r\n"} \
+            -select_streams a:0 \
+            -show_entries stream=index \
+            -of csv=p=0 \
+            "$SRC" | head -1)
+
+          [ -z "$HAS_AUD" ] \
+            && { echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"; echo "==> No audio"; } \
+            || { echo "HAVE_AUDIO=true"  >> "$GITHUB_ENV"; echo "==> Audio OK"; }
 
           if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
             TH="$QUAL"; TW=$(( (TH * 16) / 9 ))
-            echo "==> Target: ${TW}x${TH}"
+            echo "==> Target quality: ${TW}x${TH}"
           else
             TH=$OH; TW=$OW
           fi
-
-          [ "$HAS_AUD" = "true" ] \
-            && echo "HAVE_AUDIO=true" >> "$GITHUB_ENV" \
-            || echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
 
           G=${{ inputs.grid }}
           CTW=$(( (TW / G) / 4 * 4 )); [ "$CTW" -eq 0 ] && CTW=4
@@ -101,20 +110,19 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
         run: |
           python3 << 'PY' > filter.txt
           import os
-          g    = int(os.environ.get("GRID", "10"))
-          seed = int(os.environ.get("SEED", "987654321"))
-          W    = int(os.environ.get("W",    "1920"))
-          H    = int(os.environ.get("H",    "1080"))
-          tw   = int(os.environ.get("TW",   "192"))
-          th   = int(os.environ.get("TH",   "108"))
-          ov   = os.environ.get("OVERLAY", "none").strip()
-          fps  = os.environ.get("FPS",     "original").strip()
+          g      = int(os.environ.get("GRID", "10"))
+          seed   = int(os.environ.get("SEED", "987654321"))
+          W      = int(os.environ.get("W",    "1920"))
+          H      = int(os.environ.get("H",    "1080"))
+          tw     = int(os.environ.get("TW",   "192"))
+          th     = int(os.environ.get("TH",   "108"))
+          ov     = os.environ.get("OVERLAY", "none").strip()
+          fps    = os.environ.get("FPS",     "original").strip()
           has_ov = ov not in ("", "none")
           n      = g * g
           fps_f  = "" if fps == "original" else f",fps={fps}"
           SC     = f"scale={W}:{H}:flags=fast_bilinear,setsar=1"
           parts  = []
-
           if n == 1:
               if has_ov:
                   parts.append(f"[0:v]{SC}{fps_f}[vm]")
@@ -132,23 +140,18 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
               for i in range(n-1, 0, -1):
                   j = rnd() % (i+1)
                   perm[i], perm[j] = perm[j], perm[i]
-
               if has_ov:
-                  # اللوجو يُدمج قبل التقسيم ← يظهر صحيح عند العكس
                   parts.append(f"[0:v]{SC}{fps_f}[vb]")
                   parts.append(f"[1:v]{SC},format=rgba[ov]")
                   parts.append("[vb][ov]overlay=0:0:eof_action=repeat[vs]")
                   parts.append(f"[vs]split={n}" + "".join(f"[s{i}]" for i in range(n)))
               else:
                   parts.append(f"[0:v]{SC}{fps_f},split={n}" + "".join(f"[s{i}]" for i in range(n)))
-
               for i in range(n):
                   parts.append(f"[s{i}]crop={tw}:{th}:{(i%g)*tw}:{(i//g)*th}[c{i}]")
-
               xin    = "".join(f"[c{perm[o]}]" for o in range(n))
               layout = "|".join(f"{(o%g)*tw}_{(o//g)*th}" for o in range(n))
               parts.append(f"{xin}xstack=inputs={n}:layout={layout},format=yuv420p[out]")
-
           print(";".join(parts))
           PY
           echo "==> Filter:"; cat filter.txt
@@ -173,14 +176,12 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
           REF:         ${{ github.ref_name }}
         run: |
           FILTER=$(cat filter.txt)
-
           echo "==============================="
           echo " Src  : $SRC | ${TGT_H}p"
           echo " RTMP : $RTMP"
           echo " Grid : $GRID | FPS: $FPS | Loop: $IS_LOOP"
           echo "==============================="
 
-          # ── Bitrate ─────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
             if   [ "$TGT_H" -ge 2160 ]; then VBR="12000k"
             elif [ "$TGT_H" -ge 1440 ]; then VBR="8000k"
@@ -198,19 +199,17 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
           [ "$FPS" = "original" ] || [ -z "$FPS" ] && GVAL=40 || GVAL=$(( FPS * 2 ))
           echo "==> VBR: $VBR | BUF: $BUF | GOP: $GVAL"
 
-          # ── Overlay ─────────────────────────
           HAS_OV=false
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png \
               && { HAS_OV=true; echo "==> Overlay OK"; } \
-              || echo "==> Overlay FAILED"
+              || echo "==> Overlay FAILED — continuing without it"
           fi
 
-          # ── Audio fallback ───────────────────
           [ "$HAVE_AUDIO" = "false" ] && FILTER="anullsrc=r=44100:cl=stereo[aud];$FILTER"
 
-          # ── Auto-restart ─────────────────────
-          T0=$(date +%s); MAX=$((335 * 60))
+          T0=$(date +%s)
+          MAX=$((335 * 60))
 
           dispatch_new_run() {
             echo "==> Dispatching new run..."
@@ -228,7 +227,6 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
               -d "$PAYLOAD" && echo "==> Dispatch OK" || echo "==> Dispatch FAILED"
           }
 
-          # ── FFmpeg array ─────────────────────
           declare -a FF
           FF=(ffmpeg -hide_banner -loglevel warning -fflags +genpts)
           FF+=(-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5)
@@ -247,7 +245,6 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
           FF+=(-c:a aac -b:a 128k -ar 44100 -ac 2 -max_muxing_queue_size 512)
           FF+=(-f flv "$RTMP/$KEY")
 
-          # ── Stream loop ──────────────────────
           while true; do
             echo "==> [$(date '+%H:%M:%S')] Starting FFmpeg..."
             "${FF[@]}" &
@@ -255,7 +252,8 @@ except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
 
             while kill -0 $FP 2>/dev/null; do
               sleep 10; TICK=$((TICK+1))
-              [ $((TICK % 12)) -eq 0 ] && echo "==> [$(date '+%H:%M:%S')] ✅ $(( ($(date +%s)-T0)/60 ))min"
+              [ $((TICK % 12)) -eq 0 ] && \
+                echo "==> [$(date '+%H:%M:%S')] ✅ $(( ($(date +%s)-T0)/60 ))min"
               if [ $(( $(date +%s)-T0 )) -ge $MAX ]; then
                 kill $FP 2>/dev/null; wait $FP 2>/dev/null
                 dispatch_new_run; exit 0
