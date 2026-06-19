@@ -25,6 +25,13 @@ jobs:
     steps:
       - run: echo "::add-mask::${{ inputs.stream_key }}"
 
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get install -y -qq ffmpeg || \
+            (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+          ffmpeg -version | head -1
+          echo "==> FFmpeg ready"
+
       - name: Probe source
         env:
           SRC:     ${{ inputs.source_url }}
@@ -46,7 +53,7 @@ jobs:
           SRC_H=$(echo "$DIMS" | cut -dx -f2)
 
           if [ -z "$SRC_W" ] || [ -z "$SRC_H" ] || [ "$SRC_W" = "0" ]; then
-            echo "Warning: dimension probe failed, defaulting to 1920x1080"
+            echo "Warning: probe failed, defaulting to 1920x1080"
             SRC_W=1920; SRC_H=1080
           else
             echo "==> Detected: ${SRC_W}x${SRC_H}"
@@ -83,7 +90,6 @@ jobs:
           H=$((TH * G))
 
           echo "==> Canvas: ${W}x${H} | tile: ${TW}x${TH} | grid: ${G}x${G}"
-
           echo "SRC_W=$SRC_W" >> "$GITHUB_ENV"
           echo "SRC_H=$SRC_H" >> "$GITHUB_ENV"
           echo "W=$W"         >> "$GITHUB_ENV"
@@ -187,7 +193,6 @@ jobs:
           echo " Grid    : $GRID | Loop: $IS_LOOP | Audio: $HAVE_AUDIO"
           echo "==============================="
 
-          # ── Bitrate ─────────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
             if   [ "$SRC_H" -ge 2160 ]; then VBR="15000k"
             elif [ "$SRC_H" -ge 1440 ]; then VBR="10000k"
@@ -204,21 +209,18 @@ jobs:
           BUF=$((${VBR%k} * 2))k
           echo "==> VBR: $VBR | BUF: $BUF"
 
-          # ── Deblock ─────────────────────────────
           if   [ "$SRC_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
           elif [ "$SRC_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
           elif [ "$SRC_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
           else                              DEBLOCK="deblock=3,3"
           fi
 
-          # ── Keyframe ────────────────────────────
           if [ "$FPS" = "original" ] || [ -z "$FPS" ]; then
             GVAL=40
           else
             GVAL=$(( FPS * 2 ))
           fi
 
-          # ── Overlay ─────────────────────────────
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             echo "==> Downloading overlay..."
             curl -sL "$OVERLAY_URL" -o overlay.png \
@@ -226,12 +228,10 @@ jobs:
               || echo "==> Overlay download FAILED"
           fi
 
-          # ── Audio fix ───────────────────────────
           if [ "$HAVE_AUDIO" = "false" ]; then
             FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
           fi
 
-          # ── Auto-restart ────────────────────────
           WORKFLOW_START=$(date +%s)
           MAX_RUNTIME=$((335 * 60))
 
@@ -257,12 +257,10 @@ jobs:
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
               -d "$PAYLOAD" \
-              && echo "==> Dispatch OK ✓" \
-              || echo "==> Dispatch FAILED — consider using a PAT secret"
+              && echo "==> Dispatch OK" \
+              || echo "==> Dispatch FAILED"
           }
 
-          # ── Build FFmpeg command as array ────────
-          # (array يضمن صحة كل argument حتى لو يحتوي مسافات)
           declare -a FF
           FF=(ffmpeg -hide_banner -loglevel warning)
           FF+=(-fflags +genpts)
@@ -288,7 +286,6 @@ jobs:
           FF+=(-max_muxing_queue_size 1024)
           FF+=(-f flv "$RTMP/$KEY")
 
-          # ── Stream loop ──────────────────────────
           while true; do
             echo "==> [$(date '+%H:%M:%S')] Starting FFmpeg..."
             "${FF[@]}" &
