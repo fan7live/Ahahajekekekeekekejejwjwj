@@ -25,12 +25,14 @@ jobs:
     steps:
       - run: echo "::add-mask::${{ inputs.stream_key }}"
 
-      - name: Install FFmpeg (Fast Static Build)
+      - name: Install FFmpeg
         run: |
-          curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
-          tar xf ffmpeg.tar.xz
-          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
-          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          sudo apt-get install -y -qq ffmpeg && ffmpeg -version | head -1 && exit 0
+          echo "==> apt failed, using BtbN..."
+          curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o /tmp/ff.tar.xz
+          tar xf /tmp/ff.tar.xz -C /tmp/
+          sudo cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+          sudo cp /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
 
       - name: Probe source
@@ -42,41 +44,36 @@ jobs:
           UA="Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
           echo "==> Probing: $SRC"
 
-          DIMS=$(ffprobe -v warning \
+          PROBE_JSON=$(ffprobe -v error -analyzeduration 3000000 -probesize 2000000 \
             -user_agent "$UA" \
             ${REFERER:+-headers "Referer: $REFERER\r\n"} \
-            -select_streams v:0 \
-            -show_entries stream=width,height \
-            -of csv=p=0:s=x \
-            "$SRC" | head -1)
+            -print_format json -show_entries stream=codec_type,width,height \
+            "$SRC" 2>/dev/null)
 
-          OW=$(echo "$DIMS" | cut -dx -f1)
-          OH=$(echo "$DIMS" | cut -dx -f2)
-          if [ -z "$OW" ] || [ "$OW" = "0" ]; then
-            OW=1920; OH=1080
-            echo "Warning: probe failed, default 1920x1080"
-          else
-            echo "==> Detected: ${OW}x${OH}"
-          fi
+          PARSED=$(echo "${PROBE_JSON:-{}}" | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); s=d.get('streams',[])
+    v=next((x for x in s if x.get('codec_type')=='video'),{})
+    a=any(x.get('codec_type')=='audio' for x in s)
+    print(v.get('width',1920),v.get('height',1080),'true' if a else 'false')
+except: print(1920,1080,'true')" 2>/dev/null || echo "1920 1080 true")
+
+          OW=$(echo "$PARSED" | awk '{print $1}')
+          OH=$(echo "$PARSED" | awk '{print $2}')
+          HAS_AUD=$(echo "$PARSED" | awk '{print $3}')
+          [ -z "$OW" ] || [ "$OW" = "0" ] && { OW=1920; OH=1080; HAS_AUD=true; }
+          echo "==> Source: ${OW}x${OH} | Audio: $HAS_AUD"
 
           if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
-            TH="$QUAL"
-            TW=$(( (TH * 16) / 9 ))
+            TH="$QUAL"; TW=$(( (TH * 16) / 9 ))
             echo "==> Target: ${TW}x${TH}"
           else
             TH=$OH; TW=$OW
           fi
 
-          HAS_AUD=$(ffprobe -v error \
-            -user_agent "$UA" \
-            ${REFERER:+-headers "Referer: $REFERER\r\n"} \
-            -select_streams a:0 \
-            -show_entries stream=index \
-            -of csv=p=0 "$SRC" | head -1)
-          [ -z "$HAS_AUD" ] \
-            && echo "HAVE_AUDIO=false" >> "$GITHUB_ENV" \
-            && echo "==> No audio" \
-            || { echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"; echo "==> Audio OK"; }
+          [ "$HAS_AUD" = "true" ] \
+            && echo "HAVE_AUDIO=true" >> "$GITHUB_ENV" \
+            || echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
 
           G=${{ inputs.grid }}
           CTW=$(( (TW / G) / 4 * 4 )); [ "$CTW" -eq 0 ] && CTW=4
@@ -84,10 +81,10 @@ jobs:
           W=$((CTW * G)); H=$((CTH * G))
           echo "==> Canvas: ${W}x${H} | tile: ${CTW}x${CTH}"
 
-          echo "W=$W"   >> "$GITHUB_ENV"
-          echo "H=$H"   >> "$GITHUB_ENV"
-          echo "TW=$CTW" >> "$GITHUB_ENV"
-          echo "TH=$CTH" >> "$GITHUB_ENV"
+          echo "W=$W"      >> "$GITHUB_ENV"
+          echo "H=$H"      >> "$GITHUB_ENV"
+          echo "TW=$CTW"   >> "$GITHUB_ENV"
+          echo "TH=$CTH"   >> "$GITHUB_ENV"
           echo "TGT_H=$TH" >> "$GITHUB_ENV"
 
       - name: Build filter
@@ -124,7 +121,6 @@ jobs:
                   parts.append("[vm][ov]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
                   parts.append(f"[0:v]{SC}{fps_f},format=yuv420p[out]")
-
           else:
               state = seed & 0xFFFFFFFF
               def rnd():
@@ -139,7 +135,7 @@ jobs:
               if has_ov:
                   parts.append(f"[0:v]{SC}{fps_f}[vb]")
                   parts.append(f"[1:v]{SC},format=rgba[ov]")
-                  parts.append(f"[vb][ov]overlay=0:0:eof_action=repeat[vs]")
+                  parts.append("[vb][ov]overlay=0:0:eof_action=repeat[vs]")
                   parts.append(f"[vs]split={n}" + "".join(f"[s{i}]" for i in range(n)))
               else:
                   parts.append(f"[0:v]{SC}{fps_f},split={n}" + "".join(f"[s{i}]" for i in range(n)))
@@ -176,13 +172,16 @@ jobs:
         run: |
           FILTER=$(cat filter.txt)
 
+          # استخراج اسم ملف workflow الصحيح
+          WORKFLOW_FILE=$(basename "$GITHUB_WORKFLOW")
+
           echo "==============================="
           echo " Src  : $SRC | ${TGT_H}p"
           echo " RTMP : $RTMP"
           echo " Grid : $GRID | FPS: $FPS | Loop: $IS_LOOP"
           echo "==============================="
 
-          # ── Bitrate (خفيف جداً) ──────────
+          # ── Bitrate ─────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
             if   [ "$TGT_H" -ge 2160 ]; then VBR="12000k"
             elif [ "$TGT_H" -ge 1440 ]; then VBR="8000k"
@@ -197,49 +196,31 @@ jobs:
             echo "$VBR" | grep -qE '^[0-9]+$' && VBR="${VBR}k"
           fi
           BUF=$((${VBR%k} * 2))k
-
-          # ── Keyframe ──────────────────────
-          [ "$FPS" = "original" ] || [ -z "$FPS" ] \
-            && GVAL=40 || GVAL=$(( FPS * 2 ))
-
-          # ── x264-params الخفيفة جدا ─────
-          X264_OPTS="deblock=0,0:aq-mode=0:me=dia:subme=0:trellis=0:partitions=none"
-
+          [ "$FPS" = "original" ] || [ -z "$FPS" ] && GVAL=40 || GVAL=$(( FPS * 2 ))
           echo "==> VBR: $VBR | BUF: $BUF | GOP: $GVAL"
-          echo "==> x264-params: $X264_OPTS"
 
           # ── Overlay ─────────────────────────
           HAS_OV=false
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             curl -sL "$OVERLAY_URL" -o overlay.png \
-              && { HAS_OV=true; echo "==> Overlay OK ($(du -sh overlay.png | cut -f1))"; } \
-              || echo "==> Overlay FAILED — streaming without it"
+              && { HAS_OV=true; echo "==> Overlay OK"; } \
+              || echo "==> Overlay FAILED"
           fi
 
-          # ── Audio fallback ──────────────────
-          if [ "$HAVE_AUDIO" = "false" ]; then
-            FILTER="anullsrc=r=44100:cl=stereo[aud];$FILTER"
-          fi
+          # ── Audio fallback ───────────────────
+          [ "$HAVE_AUDIO" = "false" ] && FILTER="anullsrc=r=44100:cl=stereo[aud];$FILTER"
 
-          # ── Auto-restart ─────────────────────
-          T0=$(date +%s)
-          MAX=$((335 * 60))
+          # ── Auto-restart (بدون jq) ─────────
+          T0=$(date +%s); MAX=$((335 * 60))
 
           dispatch_new_run() {
             echo "==> Dispatching new run..."
-            PAYLOAD=$(jq -n \
-              --arg ref "$REF" --arg src "$SRC" --arg referer "$REFERER" \
-              --arg rtmp "$RTMP" --arg key "$KEY" --arg seed "$SEED" \
-              --arg grid "$GRID" --arg quality "$QUALITY" --arg fps "$FPS" \
-              --arg bitrate "$BITRATE" --arg is_loop "$IS_LOOP" --arg overlay "$OVERLAY_URL" \
-              '{ref:$ref,inputs:{source_url:$src,referer:$referer,rtmp_url:$rtmp,
-                stream_key:$key,seed:$seed,grid:$grid,quality:$quality,fps:$fps,
-                bitrate:$bitrate,is_loop:$is_loop,overlay_url:$overlay}}')
+            PAYLOAD="{\"ref\":\"$REF\",\"inputs\":{\"source_url\":\"$SRC\",\"referer\":\"$REFERER\",\"rtmp_url\":\"$RTMP\",\"stream_key\":\"$KEY\",\"seed\":\"$SEED\",\"grid\":\"$GRID\",\"quality\":\"$QUALITY\",\"fps\":\"$FPS\",\"bitrate\":\"$BITRATE\",\"is_loop\":\"$IS_LOOP\",\"overlay_url\":\"$OVERLAY_URL\"}}"
             curl -s -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
               -H "Content-Type: application/json" \
-              "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_FILE/dispatches" \
               -d "$PAYLOAD" && echo "==> Dispatch OK" || echo "==> Dispatch FAILED"
           }
 
@@ -250,13 +231,15 @@ jobs:
           FF+=(-user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
           [ -n "$REFERER" ] && FF+=(-headers "Referer: $REFERER\r\n")
           FF+=(-thread_queue_size 512)
-          [ "$IS_LOOP" = "true" ] && FF+=(-re -stream_loop -1)
+          FF+=(-re)                                        # حيوي جداً
+          [ "$IS_LOOP" = "true" ] && FF+=(-stream_loop -1)
           FF+=(-i "$SRC")
           [ "$HAS_OV" = "true" ] && FF+=(-thread_queue_size 512 -loop 1 -i overlay.png)
           FF+=(-filter_complex "$FILTER" -map "[out]")
           [ "$HAVE_AUDIO" = "false" ] && FF+=(-map "[aud]") || FF+=(-map "0:a:0?")
           FF+=(-c:v libx264 -preset ultrafast -tune zerolatency -threads 2 -pix_fmt yuv420p)
-          FF+=(-x264-params "$X264_OPTS")
+          FF+=(-x264-params "aq-mode=0:psy=0")
+          FF+=(-sc_threshold 0)
           FF+=(-b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF" -g "$GVAL")
           FF+=(-c:a aac -b:a 128k -ar 44100 -ac 2 -max_muxing_queue_size 512)
           FF+=(-f flv "$RTMP/$KEY")
@@ -269,8 +252,7 @@ jobs:
 
             while kill -0 $FP 2>/dev/null; do
               sleep 10; TICK=$((TICK+1))
-              [ $((TICK % 12)) -eq 0 ] && \
-                echo "==> [$(date '+%H:%M:%S')] ✅ $(( ($(date +%s)-T0)/60 ))min"
+              [ $((TICK % 12)) -eq 0 ] && echo "==> [$(date '+%H:%M:%S')] ✅ $(( ($(date +%s)-T0)/60 ))min"
               if [ $(( $(date +%s)-T0 )) -ge $MAX ]; then
                 kill $FP 2>/dev/null; wait $FP 2>/dev/null
                 dispatch_new_run; exit 0
