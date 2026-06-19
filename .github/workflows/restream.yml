@@ -264,7 +264,7 @@ jobs:
           declare -a FF
           FF=(ffmpeg -hide_banner -loglevel warning)
           FF+=(-fflags +genpts)
-          FF+=(-reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_delay_max 5)
+          FF+=(-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5)
           FF+=(-user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
           [ -n "$REFERER" ] && FF+=(-headers "Referer: $REFERER\r\n")
           FF+=(-thread_queue_size 2048)
