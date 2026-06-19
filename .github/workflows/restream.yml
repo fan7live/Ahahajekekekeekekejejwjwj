@@ -48,27 +48,21 @@ jobs:
             -of csv=p=0:s=x \
             "$SRC" | head -1)
 
-          ORIG_W=$(echo "$DIMS" | cut -dx -f1)
-          ORIG_H=$(echo "$DIMS" | cut -dx -f2)
-
-          if [ -z "$ORIG_W" ] || [ -z "$ORIG_H" ] || [ "$ORIG_W" = "0" ]; then
-            echo "Warning: probe failed, defaulting 1920x1080"
-            ORIG_W=1920; ORIG_H=1080
-          fi
-          echo "==> Detected source: ${ORIG_W}x${ORIG_H}"
-
-          # حفظ الأبعاد الأصلية للمقارنة لاحقاً في الفلتر
-          echo "ORIG_W=$ORIG_W" >> "$GITHUB_ENV"
-          echo "ORIG_H=$ORIG_H" >> "$GITHUB_ENV"
-
-          # حساب أبعاد الهدف
-          if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
-            TARGET_H="$QUAL"
-            TARGET_W=$(( (TARGET_H * 16) / 9 ))
-            echo "==> Quality target: ${TARGET_W}x${TARGET_H}"
+          OW=$(echo "$DIMS" | cut -dx -f1)
+          OH=$(echo "$DIMS" | cut -dx -f2)
+          if [ -z "$OW" ] || [ "$OW" = "0" ]; then
+            OW=1920; OH=1080
+            echo "Warning: probe failed, default 1920x1080"
           else
-            TARGET_H=$ORIG_H
-            TARGET_W=$ORIG_W
+            echo "==> Detected: ${OW}x${OH}"
+          fi
+
+          if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
+            TH="$QUAL"
+            TW=$(( (TH * 16) / 9 ))
+            echo "==> Target: ${TW}x${TH}"
+          else
+            TH=$OH; TW=$OW
           fi
 
           HAS_AUD=$(ffprobe -v error \
@@ -76,31 +70,23 @@ jobs:
             ${REFERER:+-headers "Referer: $REFERER\r\n"} \
             -select_streams a:0 \
             -show_entries stream=index \
-            -of csv=p=0 \
-            "$SRC" | head -1)
-
-          if [ -z "$HAS_AUD" ]; then
-            echo "==> No audio — will generate silence"
-            echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
-          else
-            echo "==> Audio found"
-            echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
-          fi
+            -of csv=p=0 "$SRC" | head -1)
+          [ -z "$HAS_AUD" ] \
+            && echo "HAVE_AUDIO=false" >> "$GITHUB_ENV" \
+            && echo "==> No audio" \
+            || { echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"; echo "==> Audio OK"; }
 
           G=${{ inputs.grid }}
-          TW=$(( (TARGET_W / G) / 4 * 4 ))
-          TH=$(( (TARGET_H / G) / 4 * 4 ))
-          [ "$TW" -eq 0 ] && TW=4
-          [ "$TH" -eq 0 ] && TH=4
-          W=$((TW * G))
-          H=$((TH * G))
+          CTW=$(( (TW / G) / 4 * 4 )); [ "$CTW" -eq 0 ] && CTW=4
+          CTH=$(( (TH / G) / 4 * 4 )); [ "$CTH" -eq 0 ] && CTH=4
+          W=$((CTW * G)); H=$((CTH * G))
+          echo "==> Canvas: ${W}x${H} | tile: ${CTW}x${CTH}"
 
-          echo "==> Canvas: ${W}x${H} | tile: ${TW}x${TH} | grid: ${G}x${G}"
-          echo "W=$W"           >> "$GITHUB_ENV"
-          echo "H=$H"           >> "$GITHUB_ENV"
-          echo "TW=$TW"         >> "$GITHUB_ENV"
-          echo "TH=$TH"         >> "$GITHUB_ENV"
-          echo "TARGET_H=$TARGET_H" >> "$GITHUB_ENV"
+          echo "W=$W"   >> "$GITHUB_ENV"
+          echo "H=$H"   >> "$GITHUB_ENV"
+          echo "TW=$CTW" >> "$GITHUB_ENV"
+          echo "TH=$CTH" >> "$GITHUB_ENV"
+          echo "TGT_H=$TH" >> "$GITHUB_ENV"
 
       - name: Build filter
         env:
@@ -112,75 +98,64 @@ jobs:
           H:       ${{ env.H }}
           TW:      ${{ env.TW }}
           TH:      ${{ env.TH }}
-          ORIG_W:  ${{ env.ORIG_W }}
-          ORIG_H:  ${{ env.ORIG_H }}
         run: |
           python3 << 'PY' > filter.txt
           import os
-          g           = int(os.environ.get("GRID",    "10"))
-          seed        = int(os.environ.get("SEED",    "987654321"))
-          W           = int(os.environ.get("W",       "1920"))
-          H           = int(os.environ.get("H",       "1080"))
-          tw          = int(os.environ.get("TW",      "192"))
-          th          = int(os.environ.get("TH",      "108"))
-          overlay_url = os.environ.get("OVERLAY", "none").strip()
-          fps_input   = os.environ.get("FPS",     "original").strip()
-          has_overlay = overlay_url not in ("", "none")
-          n           = g * g
-          fps_f = "" if fps_input == "original" else f",fps={fps_input}"
-
-          parts = []
+          g    = int(os.environ.get("GRID", "10"))
+          seed = int(os.environ.get("SEED", "987654321"))
+          W    = int(os.environ.get("W",    "1920"))
+          H    = int(os.environ.get("H",    "1080"))
+          tw   = int(os.environ.get("TW",   "192"))
+          th   = int(os.environ.get("TH",   "108"))
+          ov   = os.environ.get("OVERLAY", "none").strip()
+          fps  = os.environ.get("FPS",     "original").strip()
+          has_ov = ov not in ("", "none")
+          n      = g * g
+          fps_f  = "" if fps == "original" else f",fps={fps}"
+          SC     = f"scale={W}:{H}:flags=fast_bilinear,setsar=1"
+          parts  = []
 
           if n == 1:
-              # ═══════════════════════════════════════════════════════
-              # الإصلاح الأول: scale يُطبَّق دائماً بغض النظر عن المصدر
-              # هذا يضمن تقليل الجودة حتى لو المصدر نفس الدقة المختارة
-              # ═══════════════════════════════════════════════════════
-              main_vf = f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1{fps_f}"
-
-              if has_overlay:
-                  # ═══════════════════════════════════════════════════
-                  # الإصلاح الثاني: اللوجو كـ [1:v] بدل movie= filter
-                  # يضمن تطبيق scale صحيح وملء الشاشة
-                  # ═══════════════════════════════════════════════════
-                  parts.append(f"{main_vf}[v_main]")
-                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic,setsar=1,format=rgba[over]")
-                  parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
+              # ── بدون تقسيم ──────────────────────────────────────
+              if has_ov:
+                  parts.append(f"[0:v]{SC}{fps_f}[vm]")
+                  parts.append(f"[1:v]{SC},format=rgba[ov]")
+                  parts.append("[vm][ov]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
-                  parts.append(f"{main_vf},format=yuv420p[out]")
+                  parts.append(f"[0:v]{SC}{fps_f},format=yuv420p[out]")
 
           else:
+              # ── مع تقسيم ────────────────────────────────────────
+              # بناء permutation (Fisher-Yates + LCG)
               state = seed & 0xFFFFFFFF
               def rnd():
                   global state
                   state = (state * 1103515245 + 12345) & 0x7FFFFFFF
                   return state
               perm = list(range(n))
-              for i in range(n - 1, 0, -1):
-                  j = rnd() % (i + 1)
+              for i in range(n-1, 0, -1):
+                  j = rnd() % (i+1)
                   perm[i], perm[j] = perm[j], perm[i]
 
-              parts.append(
-                  f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1{fps_f},split={n}" +
-                  "".join(f"[s{i}]" for i in range(n))
-              )
+              if has_ov:
+                  # اللوجو يُدمج أولاً ثم يُقسَّم ← يظهر صحيح عند العكس
+                  parts.append(f"[0:v]{SC}{fps_f}[vb]")
+                  parts.append(f"[1:v]{SC},format=rgba[ov]")
+                  parts.append(f"[vb][ov]overlay=0:0:eof_action=repeat[vs]")
+                  parts.append(f"[vs]split={n}" + "".join(f"[s{i}]" for i in range(n)))
+              else:
+                  parts.append(f"[0:v]{SC}{fps_f},split={n}" + "".join(f"[s{i}]" for i in range(n)))
+
               for i in range(n):
                   parts.append(f"[s{i}]crop={tw}:{th}:{(i%g)*tw}:{(i//g)*th}[c{i}]")
+
               xin    = "".join(f"[c{perm[o]}]" for o in range(n))
               layout = "|".join(f"{(o%g)*tw}_{(o//g)*th}" for o in range(n))
-              parts.append(f"{xin}xstack=inputs={n}:layout={layout}[v_main]")
-
-              if has_overlay:
-                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic,setsar=1,format=rgba[over]")
-                  parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
-              else:
-                  parts.append("[v_main]format=yuv420p[out]")
+              parts.append(f"{xin}xstack=inputs={n}:layout={layout},format=yuv420p[out]")
 
           print(";".join(parts))
           PY
-
-          echo "==> Filter:"
-          cat filter.txt
+          echo "==> Filter:"; cat filter.txt
 
       - name: Stream
         env:
@@ -195,7 +170,7 @@ jobs:
           QUALITY:     ${{ inputs.quality }}
           FPS:         ${{ inputs.fps }}
           BITRATE:     ${{ inputs.bitrate }}
-          TARGET_H:    ${{ env.TARGET_H }}
+          TGT_H:       ${{ env.TGT_H }}
           HAVE_AUDIO:  ${{ env.HAVE_AUDIO }}
           GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           REPO:        ${{ github.repository }}
@@ -204,146 +179,104 @@ jobs:
           FILTER=$(cat filter.txt)
 
           echo "==============================="
-          echo " Source  : $SRC"
-          echo " Platform: $RTMP"
-          echo " Size    : ${TARGET_H}p | FPS: $FPS | Bitrate: $BITRATE"
-          echo " Grid    : $GRID | Loop: $IS_LOOP | Audio: $HAVE_AUDIO"
-          echo " Overlay : $OVERLAY_URL"
+          echo " Src  : $SRC | ${TGT_H}p"
+          echo " RTMP : $RTMP"
+          echo " Grid : $GRID | FPS: $FPS | Loop: $IS_LOOP"
           echo "==============================="
 
-          # ── Bitrate ─────────────────────────────
+          # ── Bitrate ─────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
-            if   [ "$TARGET_H" -ge 2160 ]; then VBR="15000k"
-            elif [ "$TARGET_H" -ge 1440 ]; then VBR="10000k"
-            elif [ "$TARGET_H" -ge 1080 ]; then VBR="6000k"
-            elif [ "$TARGET_H" -ge 720  ]; then VBR="3500k"
-            elif [ "$TARGET_H" -ge 480  ]; then VBR="2000k"
-            elif [ "$TARGET_H" -ge 360  ]; then VBR="1000k"
-            else                                 VBR="600k"
+            if   [ "$TGT_H" -ge 2160 ]; then VBR="15000k"
+            elif [ "$TGT_H" -ge 1440 ]; then VBR="10000k"
+            elif [ "$TGT_H" -ge 1080 ]; then VBR="6000k"
+            elif [ "$TGT_H" -ge 720  ]; then VBR="3500k"
+            elif [ "$TGT_H" -ge 480  ]; then VBR="2000k"
+            elif [ "$TGT_H" -ge 360  ]; then VBR="1000k"
+            else                              VBR="600k"
             fi
           else
             VBR="$BITRATE"
             echo "$VBR" | grep -qE '^[0-9]+$' && VBR="${VBR}k"
           fi
           BUF=$((${VBR%k} * 2))k
-          echo "==> VBR: $VBR | BUF: $BUF"
 
-          # ── Deblock ─────────────────────────────
-          if   [ "$TARGET_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
-          elif [ "$TARGET_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
-          elif [ "$TARGET_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
-          else                                 DEBLOCK="deblock=3,3"
-          fi
+          # ── Keyframe ────────────────────────
+          [ "$FPS" = "original" ] || [ -z "$FPS" ] \
+            && GVAL=40 || GVAL=$(( FPS * 2 ))
 
-          # ── Keyframe ────────────────────────────
-          if [ "$FPS" = "original" ] || [ -z "$FPS" ]; then
-            GVAL=40
-          else
-            GVAL=$(( FPS * 2 ))
-          fi
+          echo "==> VBR: $VBR | BUF: $BUF | GOP: $GVAL"
 
-          # ── Overlay ─────────────────────────────
+          # ── Overlay ─────────────────────────
+          HAS_OV=false
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
-            echo "==> Downloading overlay..."
             curl -sL "$OVERLAY_URL" -o overlay.png \
-              && echo "==> Overlay OK ($(du -sh overlay.png | cut -f1))" \
-              || echo "==> Overlay FAILED"
+              && { HAS_OV=true; echo "==> Overlay OK ($(du -sh overlay.png | cut -f1))"; } \
+              || echo "==> Overlay FAILED — streaming without it"
           fi
 
-          # ── Audio ───────────────────────────────
+          # ── Audio fallback ───────────────────
           if [ "$HAVE_AUDIO" = "false" ]; then
-            FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
+            FILTER="anullsrc=r=44100:cl=stereo[aud];$FILTER"
           fi
 
-          # ── Auto-restart ────────────────────────
-          WORKFLOW_START=$(date +%s)
-          MAX_RUNTIME=$((335 * 60))
+          # ── Auto-restart ─────────────────────
+          T0=$(date +%s)
+          MAX=$((335 * 60))
 
           dispatch_new_run() {
             echo "==> Dispatching new run..."
             PAYLOAD=$(jq -n \
-              --arg ref     "$REF"         \
-              --arg src     "$SRC"         \
-              --arg referer "$REFERER"     \
-              --arg rtmp    "$RTMP"        \
-              --arg key     "$KEY"         \
-              --arg seed    "$SEED"        \
-              --arg grid    "$GRID"        \
-              --arg quality "$QUALITY"     \
-              --arg fps     "$FPS"         \
-              --arg bitrate "$BITRATE"     \
-              --arg is_loop "$IS_LOOP"     \
-              --arg overlay "$OVERLAY_URL" \
-              '{ref:$ref,inputs:{source_url:$src,referer:$referer,rtmp_url:$rtmp,stream_key:$key,seed:$seed,grid:$grid,quality:$quality,fps:$fps,bitrate:$bitrate,is_loop:$is_loop,overlay_url:$overlay}}')
+              --arg ref "$REF" --arg src "$SRC" --arg referer "$REFERER" \
+              --arg rtmp "$RTMP" --arg key "$KEY" --arg seed "$SEED" \
+              --arg grid "$GRID" --arg quality "$QUALITY" --arg fps "$FPS" \
+              --arg bitrate "$BITRATE" --arg is_loop "$IS_LOOP" --arg overlay "$OVERLAY_URL" \
+              '{ref:$ref,inputs:{source_url:$src,referer:$referer,rtmp_url:$rtmp,
+                stream_key:$key,seed:$seed,grid:$grid,quality:$quality,fps:$fps,
+                bitrate:$bitrate,is_loop:$is_loop,overlay_url:$overlay}}')
             curl -s -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
-              -d "$PAYLOAD" \
-              && echo "==> Dispatch OK" || echo "==> Dispatch FAILED"
+              -d "$PAYLOAD" && echo "==> Dispatch OK" || echo "==> Dispatch FAILED"
           }
 
-          # ── FFmpeg command array ─────────────────
+          # ── FFmpeg array ─────────────────────
           declare -a FF
-          FF=(ffmpeg -hide_banner -loglevel warning)
-          FF+=(-fflags +genpts)
+          FF=(ffmpeg -hide_banner -loglevel warning -fflags +genpts)
           FF+=(-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5)
           FF+=(-user_agent "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36")
           [ -n "$REFERER" ] && FF+=(-headers "Referer: $REFERER\r\n")
-          FF+=(-thread_queue_size 2048)
+          FF+=(-thread_queue_size 512)
           [ "$IS_LOOP" = "true" ] && FF+=(-re -stream_loop -1)
           FF+=(-i "$SRC")
-          # ═══════════════════════════════════════════════════════
-          # الإصلاح الثالث: اللوجو كـ second input لجميع أحجام الـ grid
-          # ═══════════════════════════════════════════════════════
-          [ -f overlay.png ] && FF+=(-thread_queue_size 1024 -loop 1 -i overlay.png)
-          FF+=(-filter_complex "$FILTER")
-          FF+=(-map "[out]")
-          if [ "$HAVE_AUDIO" = "false" ]; then
-            FF+=(-map "[aud_out]")
-          else
-            FF+=(-map "0:a:0?")
-          fi
-          FF+=(-c:v libx264 -preset ultrafast -tune zerolatency)
-          FF+=(-threads 2 -pix_fmt yuv420p)
-          FF+=(-x264-params "${DEBLOCK}:aq-mode=0:psy=0:me=dia:subme=0:trellis=0:partitions=none")
+          [ "$HAS_OV" = "true" ] && FF+=(-thread_queue_size 512 -loop 1 -i overlay.png)
+          FF+=(-filter_complex "$FILTER" -map "[out]")
+          [ "$HAVE_AUDIO" = "false" ] && FF+=(-map "[aud]") || FF+=(-map "0:a:0?")
+          FF+=(-c:v libx264 -preset ultrafast -tune zerolatency -threads 2 -pix_fmt yuv420p)
+          FF+=(-x264-params "aq-mode=0:psy=0")
           FF+=(-b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF" -g "$GVAL")
-          FF+=(-c:a aac -b:a 128k -ar 44100 -ac 2)
-          FF+=(-max_muxing_queue_size 1024)
+          FF+=(-c:a aac -b:a 128k -ar 44100 -ac 2 -max_muxing_queue_size 512)
           FF+=(-f flv "$RTMP/$KEY")
 
-          # ── Stream loop ──────────────────────────
+          # ── Stream loop ──────────────────────
           while true; do
             echo "==> [$(date '+%H:%M:%S')] Starting FFmpeg..."
             "${FF[@]}" &
-            FFMPEG_PID=$!
+            FP=$!; TICK=0
 
-            TICK=0
-            while kill -0 $FFMPEG_PID 2>/dev/null; do
-              sleep 10
-              TICK=$((TICK + 1))
-              # طباعة حالة كل دقيقتين
-              if [ $((TICK % 12)) -eq 0 ]; then
-                echo "==> [$(date '+%H:%M:%S')] ✅ Live... $(( ($(date +%s) - WORKFLOW_START) / 60 ))min"
-              fi
-              if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
-                echo "==> Timeout — switching to new run..."
-                kill $FFMPEG_PID 2>/dev/null || true
-                wait $FFMPEG_PID 2>/dev/null || true
-                dispatch_new_run
-                exit 0
+            while kill -0 $FP 2>/dev/null; do
+              sleep 10; TICK=$((TICK+1))
+              [ $((TICK % 12)) -eq 0 ] && \
+                echo "==> [$(date '+%H:%M:%S')] ✅ $(( ($(date +%s)-T0)/60 ))min"
+              if [ $(( $(date +%s)-T0 )) -ge $MAX ]; then
+                kill $FP 2>/dev/null; wait $FP 2>/dev/null
+                dispatch_new_run; exit 0
               fi
             done
 
-            wait $FFMPEG_PID
-            EC=$?
+            wait $FP; EC=$?
             echo "==> [$(date '+%H:%M:%S')] FFmpeg exited (code: $EC)"
-
-            if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
-              dispatch_new_run; exit 0
-            fi
-
-            echo "==> Reconnecting in 5s..."
+            [ $(( $(date +%s)-T0 )) -ge $MAX ] && { dispatch_new_run; exit 0; }
             sleep 5
           done
