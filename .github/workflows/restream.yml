@@ -30,7 +30,6 @@ jobs:
           sudo apt-get install -y -qq ffmpeg || \
             (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
           ffmpeg -version | head -1
-          echo "==> FFmpeg ready"
 
       - name: Probe source
         env:
@@ -49,20 +48,27 @@ jobs:
             -of csv=p=0:s=x \
             "$SRC" | head -1)
 
-          SRC_W=$(echo "$DIMS" | cut -dx -f1)
-          SRC_H=$(echo "$DIMS" | cut -dx -f2)
+          ORIG_W=$(echo "$DIMS" | cut -dx -f1)
+          ORIG_H=$(echo "$DIMS" | cut -dx -f2)
 
-          if [ -z "$SRC_W" ] || [ -z "$SRC_H" ] || [ "$SRC_W" = "0" ]; then
-            echo "Warning: probe failed, defaulting to 1920x1080"
-            SRC_W=1920; SRC_H=1080
-          else
-            echo "==> Detected: ${SRC_W}x${SRC_H}"
+          if [ -z "$ORIG_W" ] || [ -z "$ORIG_H" ] || [ "$ORIG_W" = "0" ]; then
+            echo "Warning: probe failed, defaulting 1920x1080"
+            ORIG_W=1920; ORIG_H=1080
           fi
+          echo "==> Detected source: ${ORIG_W}x${ORIG_H}"
 
+          # حفظ الأبعاد الأصلية للمقارنة لاحقاً في الفلتر
+          echo "ORIG_W=$ORIG_W" >> "$GITHUB_ENV"
+          echo "ORIG_H=$ORIG_H" >> "$GITHUB_ENV"
+
+          # حساب أبعاد الهدف
           if [ "$QUAL" != "original" ] && [ -n "$QUAL" ]; then
-            SRC_H="$QUAL"
-            SRC_W=$(( (SRC_H * 16) / 9 ))
-            echo "==> Quality override -> ${SRC_W}x${SRC_H}"
+            TARGET_H="$QUAL"
+            TARGET_W=$(( (TARGET_H * 16) / 9 ))
+            echo "==> Quality target: ${TARGET_W}x${TARGET_H}"
+          else
+            TARGET_H=$ORIG_H
+            TARGET_W=$ORIG_W
           fi
 
           HAS_AUD=$(ffprobe -v error \
@@ -77,25 +83,24 @@ jobs:
             echo "==> No audio — will generate silence"
             echo "HAVE_AUDIO=false" >> "$GITHUB_ENV"
           else
-            echo "==> Audio track found"
+            echo "==> Audio found"
             echo "HAVE_AUDIO=true" >> "$GITHUB_ENV"
           fi
 
           G=${{ inputs.grid }}
-          TW=$(( (SRC_W / G) / 4 * 4 ))
-          TH=$(( (SRC_H / G) / 4 * 4 ))
+          TW=$(( (TARGET_W / G) / 4 * 4 ))
+          TH=$(( (TARGET_H / G) / 4 * 4 ))
           [ "$TW" -eq 0 ] && TW=4
           [ "$TH" -eq 0 ] && TH=4
           W=$((TW * G))
           H=$((TH * G))
 
           echo "==> Canvas: ${W}x${H} | tile: ${TW}x${TH} | grid: ${G}x${G}"
-          echo "SRC_W=$SRC_W" >> "$GITHUB_ENV"
-          echo "SRC_H=$SRC_H" >> "$GITHUB_ENV"
-          echo "W=$W"         >> "$GITHUB_ENV"
-          echo "H=$H"         >> "$GITHUB_ENV"
-          echo "TW=$TW"       >> "$GITHUB_ENV"
-          echo "TH=$TH"       >> "$GITHUB_ENV"
+          echo "W=$W"           >> "$GITHUB_ENV"
+          echo "H=$H"           >> "$GITHUB_ENV"
+          echo "TW=$TW"         >> "$GITHUB_ENV"
+          echo "TH=$TH"         >> "$GITHUB_ENV"
+          echo "TARGET_H=$TARGET_H" >> "$GITHUB_ENV"
 
       - name: Build filter
         env:
@@ -107,8 +112,8 @@ jobs:
           H:       ${{ env.H }}
           TW:      ${{ env.TW }}
           TH:      ${{ env.TH }}
-          SRC_W:   ${{ env.SRC_W }}
-          SRC_H:   ${{ env.SRC_H }}
+          ORIG_W:  ${{ env.ORIG_W }}
+          ORIG_H:  ${{ env.ORIG_H }}
         run: |
           python3 << 'PY' > filter.txt
           import os
@@ -123,20 +128,27 @@ jobs:
           has_overlay = overlay_url not in ("", "none")
           n           = g * g
           fps_f = "" if fps_input == "original" else f",fps={fps_input}"
+
           parts = []
+
           if n == 1:
-              src_w = int(os.environ.get("SRC_W", str(W)))
-              src_h = int(os.environ.get("SRC_H", str(H)))
-              if W != src_w or H != src_h:
-                  main_vf = f"[0:v]scale={W}:{H}:flags=fast_bilinear,setsar=1{fps_f}"
-              else:
-                  main_vf = (f"[0:v]setsar=1{fps_f}" if fps_f else "[0:v]setsar=1")
+              # ═══════════════════════════════════════════════════════
+              # الإصلاح الأول: scale يُطبَّق دائماً بغض النظر عن المصدر
+              # هذا يضمن تقليل الجودة حتى لو المصدر نفس الدقة المختارة
+              # ═══════════════════════════════════════════════════════
+              main_vf = f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1{fps_f}"
+
               if has_overlay:
+                  # ═══════════════════════════════════════════════════
+                  # الإصلاح الثاني: اللوجو كـ [1:v] بدل movie= filter
+                  # يضمن تطبيق scale صحيح وملء الشاشة
+                  # ═══════════════════════════════════════════════════
                   parts.append(f"{main_vf}[v_main]")
-                  parts.append(f"movie=overlay.png,scale={W}:{H}:flags=fast_bilinear,format=rgba[over]")
+                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic,setsar=1,format=rgba[over]")
                   parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
                   parts.append(f"{main_vf},format=yuv420p[out]")
+
           else:
               state = seed & 0xFFFFFFFF
               def rnd():
@@ -147,6 +159,7 @@ jobs:
               for i in range(n - 1, 0, -1):
                   j = rnd() % (i + 1)
                   perm[i], perm[j] = perm[j], perm[i]
+
               parts.append(
                   f"[0:v]scale={W}:{H}:flags=bicubic,setsar=1{fps_f},split={n}" +
                   "".join(f"[s{i}]" for i in range(n))
@@ -156,14 +169,18 @@ jobs:
               xin    = "".join(f"[c{perm[o]}]" for o in range(n))
               layout = "|".join(f"{(o%g)*tw}_{(o//g)*th}" for o in range(n))
               parts.append(f"{xin}xstack=inputs={n}:layout={layout}[v_main]")
+
               if has_overlay:
-                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic[over]")
-                  parts.append("[v_main][over]overlay=0:0,format=yuv420p[out]")
+                  parts.append(f"[1:v]scale={W}:{H}:flags=bicubic,setsar=1,format=rgba[over]")
+                  parts.append("[v_main][over]overlay=0:0:eof_action=repeat,format=yuv420p[out]")
               else:
                   parts.append("[v_main]format=yuv420p[out]")
+
           print(";".join(parts))
           PY
-          echo "==> Filter (preview): $(head -c 250 filter.txt)"
+
+          echo "==> Filter:"
+          cat filter.txt
 
       - name: Stream
         env:
@@ -178,7 +195,7 @@ jobs:
           QUALITY:     ${{ inputs.quality }}
           FPS:         ${{ inputs.fps }}
           BITRATE:     ${{ inputs.bitrate }}
-          SRC_H:       ${{ env.SRC_H }}
+          TARGET_H:    ${{ env.TARGET_H }}
           HAVE_AUDIO:  ${{ env.HAVE_AUDIO }}
           GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           REPO:        ${{ github.repository }}
@@ -189,18 +206,20 @@ jobs:
           echo "==============================="
           echo " Source  : $SRC"
           echo " Platform: $RTMP"
-          echo " Size    : ${SRC_H}p | FPS: $FPS | Bitrate: $BITRATE"
+          echo " Size    : ${TARGET_H}p | FPS: $FPS | Bitrate: $BITRATE"
           echo " Grid    : $GRID | Loop: $IS_LOOP | Audio: $HAVE_AUDIO"
+          echo " Overlay : $OVERLAY_URL"
           echo "==============================="
 
+          # ── Bitrate ─────────────────────────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
-            if   [ "$SRC_H" -ge 2160 ]; then VBR="15000k"
-            elif [ "$SRC_H" -ge 1440 ]; then VBR="10000k"
-            elif [ "$SRC_H" -ge 1080 ]; then VBR="6000k"
-            elif [ "$SRC_H" -ge 720  ]; then VBR="3500k"
-            elif [ "$SRC_H" -ge 480  ]; then VBR="2000k"
-            elif [ "$SRC_H" -ge 360  ]; then VBR="1000k"
-            else                              VBR="600k"
+            if   [ "$TARGET_H" -ge 2160 ]; then VBR="15000k"
+            elif [ "$TARGET_H" -ge 1440 ]; then VBR="10000k"
+            elif [ "$TARGET_H" -ge 1080 ]; then VBR="6000k"
+            elif [ "$TARGET_H" -ge 720  ]; then VBR="3500k"
+            elif [ "$TARGET_H" -ge 480  ]; then VBR="2000k"
+            elif [ "$TARGET_H" -ge 360  ]; then VBR="1000k"
+            else                                 VBR="600k"
             fi
           else
             VBR="$BITRATE"
@@ -209,46 +228,51 @@ jobs:
           BUF=$((${VBR%k} * 2))k
           echo "==> VBR: $VBR | BUF: $BUF"
 
-          if   [ "$SRC_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
-          elif [ "$SRC_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
-          elif [ "$SRC_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
-          else                              DEBLOCK="deblock=3,3"
+          # ── Deblock ─────────────────────────────
+          if   [ "$TARGET_H" -ge 2160 ]; then DEBLOCK="deblock=0,0"
+          elif [ "$TARGET_H" -ge 1080 ]; then DEBLOCK="deblock=1,1"
+          elif [ "$TARGET_H" -ge 720  ]; then DEBLOCK="deblock=2,2"
+          else                                 DEBLOCK="deblock=3,3"
           fi
 
+          # ── Keyframe ────────────────────────────
           if [ "$FPS" = "original" ] || [ -z "$FPS" ]; then
             GVAL=40
           else
             GVAL=$(( FPS * 2 ))
           fi
 
+          # ── Overlay ─────────────────────────────
           if [ -n "$OVERLAY_URL" ] && [ "$OVERLAY_URL" != "none" ]; then
             echo "==> Downloading overlay..."
             curl -sL "$OVERLAY_URL" -o overlay.png \
               && echo "==> Overlay OK ($(du -sh overlay.png | cut -f1))" \
-              || echo "==> Overlay download FAILED"
+              || echo "==> Overlay FAILED"
           fi
 
+          # ── Audio ───────────────────────────────
           if [ "$HAVE_AUDIO" = "false" ]; then
             FILTER="anullsrc=r=44100:cl=stereo[aud_out];$FILTER"
           fi
 
+          # ── Auto-restart ────────────────────────
           WORKFLOW_START=$(date +%s)
           MAX_RUNTIME=$((335 * 60))
 
           dispatch_new_run() {
-            echo "==> [$(date '+%H:%M:%S')] Dispatching new workflow run..."
+            echo "==> Dispatching new run..."
             PAYLOAD=$(jq -n \
-              --arg ref     "$REF" \
-              --arg src     "$SRC" \
-              --arg referer "$REFERER" \
-              --arg rtmp    "$RTMP" \
-              --arg key     "$KEY" \
-              --arg seed    "$SEED" \
-              --arg grid    "$GRID" \
-              --arg quality "$QUALITY" \
-              --arg fps     "$FPS" \
-              --arg bitrate "$BITRATE" \
-              --arg is_loop "$IS_LOOP" \
+              --arg ref     "$REF"         \
+              --arg src     "$SRC"         \
+              --arg referer "$REFERER"     \
+              --arg rtmp    "$RTMP"        \
+              --arg key     "$KEY"         \
+              --arg seed    "$SEED"        \
+              --arg grid    "$GRID"        \
+              --arg quality "$QUALITY"     \
+              --arg fps     "$FPS"         \
+              --arg bitrate "$BITRATE"     \
+              --arg is_loop "$IS_LOOP"     \
               --arg overlay "$OVERLAY_URL" \
               '{ref:$ref,inputs:{source_url:$src,referer:$referer,rtmp_url:$rtmp,stream_key:$key,seed:$seed,grid:$grid,quality:$quality,fps:$fps,bitrate:$bitrate,is_loop:$is_loop,overlay_url:$overlay}}')
             curl -s -X POST \
@@ -257,10 +281,10 @@ jobs:
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/$REPO/actions/workflows/restream.yml/dispatches" \
               -d "$PAYLOAD" \
-              && echo "==> Dispatch OK" \
-              || echo "==> Dispatch FAILED"
+              && echo "==> Dispatch OK" || echo "==> Dispatch FAILED"
           }
 
+          # ── FFmpeg command array ─────────────────
           declare -a FF
           FF=(ffmpeg -hide_banner -loglevel warning)
           FF+=(-fflags +genpts)
@@ -270,7 +294,10 @@ jobs:
           FF+=(-thread_queue_size 2048)
           [ "$IS_LOOP" = "true" ] && FF+=(-re -stream_loop -1)
           FF+=(-i "$SRC")
-          [ -f overlay.png ] && [ "$GRID" -gt 1 ] && FF+=(-thread_queue_size 1024 -loop 1 -i overlay.png)
+          # ═══════════════════════════════════════════════════════
+          # الإصلاح الثالث: اللوجو كـ second input لجميع أحجام الـ grid
+          # ═══════════════════════════════════════════════════════
+          [ -f overlay.png ] && FF+=(-thread_queue_size 1024 -loop 1 -i overlay.png)
           FF+=(-filter_complex "$FILTER")
           FF+=(-map "[out]")
           if [ "$HAVE_AUDIO" = "false" ]; then
@@ -286,15 +313,22 @@ jobs:
           FF+=(-max_muxing_queue_size 1024)
           FF+=(-f flv "$RTMP/$KEY")
 
+          # ── Stream loop ──────────────────────────
           while true; do
             echo "==> [$(date '+%H:%M:%S')] Starting FFmpeg..."
             "${FF[@]}" &
             FFMPEG_PID=$!
 
+            TICK=0
             while kill -0 $FFMPEG_PID 2>/dev/null; do
               sleep 10
+              TICK=$((TICK + 1))
+              # طباعة حالة كل دقيقتين
+              if [ $((TICK % 12)) -eq 0 ]; then
+                echo "==> [$(date '+%H:%M:%S')] ✅ Live... $(( ($(date +%s) - WORKFLOW_START) / 60 ))min"
+              fi
               if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
-                echo "==> [$(date '+%H:%M:%S')] Timeout — switching to new run..."
+                echo "==> Timeout — switching to new run..."
                 kill $FFMPEG_PID 2>/dev/null || true
                 wait $FFMPEG_PID 2>/dev/null || true
                 dispatch_new_run
@@ -307,8 +341,7 @@ jobs:
             echo "==> [$(date '+%H:%M:%S')] FFmpeg exited (code: $EC)"
 
             if [ $(( $(date +%s) - WORKFLOW_START )) -ge $MAX_RUNTIME ]; then
-              dispatch_new_run
-              exit 0
+              dispatch_new_run; exit 0
             fi
 
             echo "==> Reconnecting in 5s..."
