@@ -25,10 +25,12 @@ jobs:
     steps:
       - run: echo "::add-mask::${{ inputs.stream_key }}"
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg (Fast Static Build)
         run: |
-          sudo apt-get install -y -qq ffmpeg || \
-            (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+          curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
+          tar xf ffmpeg.tar.xz
+          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+          sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
 
       - name: Probe source
@@ -116,7 +118,6 @@ jobs:
           parts  = []
 
           if n == 1:
-              # بدون تقسيم
               if has_ov:
                   parts.append(f"[0:v]{SC}{fps_f}[vm]")
                   parts.append(f"[1:v]{SC},format=rgba[ov]")
@@ -125,7 +126,6 @@ jobs:
                   parts.append(f"[0:v]{SC}{fps_f},format=yuv420p[out]")
 
           else:
-              # مع تقسيم
               state = seed & 0xFFFFFFFF
               def rnd():
                   global state
@@ -182,12 +182,12 @@ jobs:
           echo " Grid : $GRID | FPS: $FPS | Loop: $IS_LOOP"
           echo "==============================="
 
-          # ── Bitrate (خفيف ومناسب) ──────────
+          # ── Bitrate (خفيف جداً) ──────────
           if [ "$BITRATE" = "auto" ] || [ -z "$BITRATE" ]; then
-            if   [ "$TGT_H" -ge 2160 ]; then VBR="12000k"   # خفّضنا من 15000
-            elif [ "$TGT_H" -ge 1440 ]; then VBR="8000k"    # خفّضنا من 10000
-            elif [ "$TGT_H" -ge 1080 ]; then VBR="4500k"    # خفّضنا من 6000
-            elif [ "$TGT_H" -ge 720  ]; then VBR="3000k"    # خفّضنا قليلاً
+            if   [ "$TGT_H" -ge 2160 ]; then VBR="12000k"
+            elif [ "$TGT_H" -ge 1440 ]; then VBR="8000k"
+            elif [ "$TGT_H" -ge 1080 ]; then VBR="4500k"
+            elif [ "$TGT_H" -ge 720  ]; then VBR="3000k"
             elif [ "$TGT_H" -ge 480  ]; then VBR="1800k"
             elif [ "$TGT_H" -ge 360  ]; then VBR="900k"
             else                              VBR="500k"
@@ -198,12 +198,11 @@ jobs:
           fi
           BUF=$((${VBR%k} * 2))k
 
-          # ── Keyframe (GOP) ──────────────────
+          # ── Keyframe ──────────────────────
           [ "$FPS" = "original" ] || [ -z "$FPS" ] \
             && GVAL=40 || GVAL=$(( FPS * 2 ))
 
-          # ── x264-params الخفيفة جدا ─────────
-          # deblock=0,0 يعطّل الفلتر ويوفّر CPU
+          # ── x264-params الخفيفة جدا ─────
           X264_OPTS="deblock=0,0:aq-mode=0:me=dia:subme=0:trellis=0:partitions=none"
 
           echo "==> VBR: $VBR | BUF: $BUF | GOP: $GVAL"
