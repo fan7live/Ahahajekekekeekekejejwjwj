@@ -133,7 +133,7 @@ jobs:
               SF="scale=$(echo "${QUALITY}" | tr 'x' ':'):flags=fast_bilinear,setsar=1"
             fi
             if [ "${HAS_LOGO}" = "1" ]; then
-              C+=(-filter_complex "[0:v]${SF}[bg];movie=logo.png,scale=iw:ih:flags=fast_bilinear,setsar=1,format=rgba[l];[bg][l]overlay=0:0:eof_action=repeat,format=yuv420p[v]")
+              C+=(-filter_complex "[0:v]${SF}[bg];movie=logo.png[logo];[bg][logo]scale2ref=iw:ih:flags=fast_bilinear,format=rgba[logo];[bg][logo]overlay=0:0:eof_action=repeat,format=yuv420p[v]")
             else
               C+=(-filter_complex "[0:v]${SF},format=yuv420p[v]")
             fi
