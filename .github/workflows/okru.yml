@@ -1,116 +1,204 @@
-name: "بث OK.ru - 1080p 60fps + شعار + إعادة تشغيل ذاتي 24 ساعة"
+name: "🔴 ${{ inputs.stream_name }}"
 
 on:
   workflow_dispatch:
     inputs:
-      source_url:
-        description: 'رابط المصدر'
-        required: true
-        default: 'http://tv.business-cdn-8k.com/live/3169f822cf0e/112a2eb58f/544456.m3u8'
-      rtmp_base:
-        description: 'رابط RTMP OK.ru'
-        required: true
-        default: 'rtmp://vsu.okcdn.ru/input'
-      stream_key:
-        description: 'مفتاح البث'
-        required: true
-        default: 'مفتاحك_هنا'
-      logo_url:
-        description: 'رابط الشعار'
+      stream_id:
+        description: 'Stream ID'
         required: false
-        default: 'https://e.top4top.io/p_3818nc1gm1.png'
+        default: ''
+      stream_name:
+        description: 'Stream Name'
+        required: false
+        default: 'Live Stream'
+      source_url:
+        description: 'Source URL'
+        required: true
+        default: ''
+      rtmp_url:
+        description: 'RTMP URL'
+        required: true
+        default: ''
+      stream_key:
+        description: 'Stream Key'
+        required: true
+        default: ''
+      logo_url:
+        description: 'Logo URL'
+        required: false
+        default: ''
+      quality:
+        description: 'Quality (e.g. 1920x1080 or source)'
+        required: false
+        default: 'source'
+      fps:
+        description: 'FPS (e.g. 60 or source)'
+        required: false
+        default: 'source'
+      video_bitrate:
+        description: 'Video Bitrate (e.g. 9000k or source)'
+        required: false
+        default: 'source'
+      audio_bitrate:
+        description: 'Audio Bitrate'
+        required: false
+        default: '192k'
+      user_agent:
+        description: 'User Agent'
+        required: false
+        default: ''
+      referer:
+        description: 'Referer Header'
+        required: false
+        default: ''
+      origin:
+        description: 'Origin Header'
+        required: false
+        default: ''
+      cookies:
+        description: 'Cookies'
+        required: false
+        default: ''
 
 jobs:
-  ok_ru_loop:
+  stream:
+    name: "🔴 ${{ inputs.stream_name }}"
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
       actions: write
+
     steps:
-      - name: تثبيت ffmpeg (نسخة ثابتة سريعة من GitHub)
+      - name: Install FFmpeg
         run: |
-          curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
+          echo "📦 Installing FFmpeg..."
+          curl -fL --retry 3 \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
+            -o ffmpeg.tar.xz
           tar xf ffmpeg.tar.xz
           sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
           sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          ffmpeg -version 2>&1 | head -1
 
-      - name: بث مستمر مع إعادة تشغيل ذاتية
+      - name: Start Streaming
         env:
-          SOURCE_URL: ${{ inputs.source_url }}
-          RTMP_BASE: ${{ inputs.rtmp_base }}
-          STREAM_KEY: ${{ inputs.stream_key }}
-          LOGO_URL: ${{ inputs.logo_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref_name }}
-          WORKFLOW_FILE: 'okru.yml'   # ⚠️ تأكد أن اسم الملف مطابق
+          SOURCE_URL:    ${{ inputs.source_url }}
+          RTMP_URL:      ${{ inputs.rtmp_url }}
+          STREAM_KEY:    ${{ inputs.stream_key }}
+          LOGO_URL:      ${{ inputs.logo_url }}
+          QUALITY:       ${{ inputs.quality }}
+          FPS:           ${{ inputs.fps }}
+          VIDEO_BITRATE: ${{ inputs.video_bitrate }}
+          AUDIO_BITRATE: ${{ inputs.audio_bitrate }}
+          USER_AGENT:    ${{ inputs.user_agent }}
+          REFERER:       ${{ inputs.referer }}
+          ORIGIN:        ${{ inputs.origin }}
+          COOKIES:       ${{ inputs.cookies }}
+          STREAM_NAME:   ${{ inputs.stream_name }}
+          STREAM_ID:     ${{ inputs.stream_id }}
+          GH_TOKEN:      ${{ secrets.OMA_GITHUB_TOKEN }}
+          REPO:          ${{ github.repository }}
+          REF:           ${{ github.ref_name }}
+          WORKFLOW_FILE: "okru.yml"
         run: |
-          OUTPUT_URL="${RTMP_BASE}/${STREAM_KEY}"
-          DISPATCH_URL="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches"
+          OUTPUT="${RTMP_URL}/${STREAM_KEY}"
+          DISPATCH="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches"
+          MAX=$((5*3600 + 40*60))
+          INTERVAL=600
+          T0=$(date +%s)
 
-          if [ -n "$LOGO_URL" ]; then
-            echo "تحميل الشعار..."
-            curl -L --max-time 30 -o logo.png "$LOGO_URL" || { echo "فشل التحميل"; exit 1; }
+          HAS_LOGO=0
+          if [ -n "${LOGO_URL:-}" ]; then
+            echo "⬇️ Downloading logo..."
+            if curl -fL --max-time 30 -o logo.png "${LOGO_URL}" 2>/dev/null; then
+              HAS_LOGO=1
+              echo "✅ Logo ready"
+            else
+              echo "⚠️ Logo download failed"
+            fi
           fi
 
-          MAX_CYCLE=$((5*3600 + 40*60))
-          RESTART_INTERVAL=600
+          build() {
+            local -a C
+            local H=""
+            C+=(-re -fflags +genpts -analyzeduration 3000000 -probesize 2000000)
+            [ -n "${USER_AGENT:-}" ] && C+=(-user_agent "${USER_AGENT}")
+            [ -n "${REFERER:-}"    ] && H+="Referer: ${REFERER}\r\n"
+            [ -n "${ORIGIN:-}"     ] && H+="Origin: ${ORIGIN}\r\n"
+            [ -n "${COOKIES:-}"    ] && H+="Cookie: ${COOKIES}\r\n"
+            [ -n "${H}"            ] && C+=(-headers "${H}")
+            C+=(-i "${SOURCE_URL}")
+            local SF="setsar=1"
+            if [ "${QUALITY:-source}" != "source" ] && [ -n "${QUALITY:-}" ]; then
+              SF="scale=$(echo "${QUALITY}" | tr 'x' ':'):flags=fast_bilinear,setsar=1"
+            fi
+            if [ "${HAS_LOGO}" = "1" ]; then
+              C+=(-filter_complex "[0:v]${SF}[bg];movie=logo.png,scale=iw:ih:flags=fast_bilinear,setsar=1,format=rgba[l];[bg][l]overlay=0:0:eof_action=repeat,format=yuv420p[v]")
+            else
+              C+=(-filter_complex "[0:v]${SF},format=yuv420p[v]")
+            fi
+            C+=(-map "[v]" -map 0:a)
+            C+=(-c:v libx264 -preset ultrafast -tune zerolatency)
+            if [ "${VIDEO_BITRATE:-source}" != "source" ] && [ -n "${VIDEO_BITRATE:-}" ]; then
+              local VN="${VIDEO_BITRATE%k}"
+              C+=(-b:v "${VIDEO_BITRATE}" -maxrate "${VIDEO_BITRATE}" -bufsize "$((VN*2))k")
+            fi
+            if [ "${FPS:-source}" != "source" ] && [ -n "${FPS:-}" ]; then
+              C+=(-r "${FPS}" -g "$((FPS*2))" -sc_threshold 0)
+            fi
+            C+=(-c:a aac -b:a "${AUDIO_BITRATE:-192k}" -ar 48000 -ac 2)
+            C+=(-f flv "${OUTPUT}")
+            printf '%s\0' "${C[@]}"
+          }
 
           while true; do
-            echo "بدء / إعادة تشغيل البث..."
-            START_TIME=$(date +%s)
-            CYCLE_START=$(date +%s)
-
-            if [ -n "$LOGO_URL" ]; then
-              ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
-                -filter_complex \
-                  "[0:v]scale=1920:1080,setsar=1[bg]; \
-                   movie=logo.png,scale=1920:1080:flags=fast_bilinear,setsar=1,format=rgba[logo]; \
-                   [bg][logo]overlay=0:0:eof_action=repeat,format=yuv420p[v]" \
-                -c:v libx264 -preset ultrafast -tune zerolatency \
-                -b:v 9000k -maxrate 9500k -bufsize 18000k \
-                -r 60 -g 120 \
-                -c:a aac -b:a 192k -ar 48000 -ac 2 \
-                -map "[v]" -map 0:a \
-                -f flv "$OUTPUT_URL" &
-            else
-              ffmpeg -re -fflags +genpts -i "$SOURCE_URL" \
-                -c:v libx264 -preset ultrafast -tune zerolatency \
-                -b:v 9000k -maxrate 9500k -bufsize 18000k \
-                -s 1920x1080 -r 60 -g 120 \
-                -c:a aac -b:a 192k -ar 48000 -ac 2 \
-                -f flv "$OUTPUT_URL" &
-            fi
-            FFMPEG_PID=$!
+            echo "🚀 FFmpeg start — $(date '+%T')"
+            CS=$(date +%s)
+            mapfile -d '' ARGS < <(build)
+            ffmpeg "${ARGS[@]}" &
+            PID=$!
+            echo "📡 PID: ${PID}"
 
             while true; do
               sleep 10
               NOW=$(date +%s)
-              CYCLE_ELAPSED=$((NOW - CYCLE_START))
+              TOT=$((NOW - T0))
+              CYC=$((NOW - CS))
 
-              if [ $CYCLE_ELAPSED -ge $RESTART_INTERVAL ]; then
-                echo "إعادة التشغيل الدوري..."
-                kill $FFMPEG_PID 2>/dev/null || true
-                break
-              fi
-
-              TOTAL_ELAPSED=$((NOW - START_TIME))
-              if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
-                echo "تشغيل دورة جديدة عبر API..."
-                kill $FFMPEG_PID 2>/dev/null || true
-                curl -X POST \
-                  -H "Authorization: token $GITHUB_TOKEN" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "$DISPATCH_URL" \
-                  -d "{\"ref\":\"$REF\",\"inputs\":{\"source_url\":\"$SOURCE_URL\",\"rtmp_base\":\"$RTMP_BASE\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\"}}"
-                echo "تم الطلب. إنهاء الدورة الحالية."
+              if [ ${TOT} -ge ${MAX} ]; then
+                echo "⏰ Dispatching new run..."
+                kill ${PID} 2>/dev/null || true
+                jq -nc \
+                  --arg ref "${REF}"         --arg sid "${STREAM_ID}"    \
+                  --arg sn  "${STREAM_NAME}" --arg su  "${SOURCE_URL}"   \
+                  --arg ru  "${RTMP_URL}"    --arg sk  "${STREAM_KEY}"   \
+                  --arg lu  "${LOGO_URL}"    --arg q   "${QUALITY}"      \
+                  --arg f   "${FPS}"         --arg vb  "${VIDEO_BITRATE}" \
+                  --arg ab  "${AUDIO_BITRATE}" --arg ua "${USER_AGENT}"  \
+                  --arg rf  "${REFERER}"     --arg og  "${ORIGIN}"       \
+                  --arg ck  "${COOKIES}"     \
+                  '{ref:$ref,inputs:{stream_id:$sid,stream_name:$sn,source_url:$su,rtmp_url:$ru,stream_key:$sk,logo_url:$lu,quality:$q,fps:$f,video_bitrate:$vb,audio_bitrate:$ab,user_agent:$ua,referer:$rf,origin:$og,cookies:$ck}}' \
+                | curl -sf -X POST \
+                    -H "Authorization: token ${GH_TOKEN}" \
+                    -H "Accept: application/vnd.github.v3+json" \
+                    -H "Content-Type: application/json" \
+                    "${DISPATCH}" -d @-
+                echo "✅ New run dispatched. Exiting."
                 exit 0
               fi
 
-              if ! kill -0 $FFMPEG_PID 2>/dev/null; then
-                echo "ffmpeg توقف. إعادة تشغيل..."
+              if [ ${CYC} -ge ${INTERVAL} ]; then
+                echo "🔄 Periodic restart..."
+                kill ${PID} 2>/dev/null || true
+                break
+              fi
+
+              if ! kill -0 ${PID} 2>/dev/null; then
+                echo "⚠️ FFmpeg stopped, restarting..."
                 break
               fi
             done
+
+            wait ${PID} 2>/dev/null || true
             sleep 2
           done
