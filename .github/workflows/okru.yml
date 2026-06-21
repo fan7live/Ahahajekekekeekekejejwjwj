@@ -120,23 +120,36 @@ jobs:
 
           build() {
             local -a C
-            local H=""
             C+=(-re -fflags +genpts -analyzeduration 3000000 -probesize 2000000)
 
-            # Use a strong default User-Agent if not provided
+            # تعيين User-Agent افتراضي قوي إن لم يُعطَ
             local UA="${USER_AGENT:-}"
             if [ -z "${UA}" ] || [ "${UA}" = "null" ]; then
               UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             fi
             C+=(-user_agent "${UA}")
 
-            # Build headers, ignoring empty or null values
-            local H=""
-            if [ -n "${REFERER:-}" ] && [ "${REFERER}" != "null" ] && [ "${REFERER}" != "''" ]; then
-              H+="Referer: ${REFERER}\r\n"
+            # توليد Referer و Origin تلقائياً من رابط المصدر إذا لم يتم إدخالهما
+            local REF="${REFERER:-}"
+            if [ -z "${REF}" ] || [ "${REF}" = "null" ]; then
+              REF="$(echo "${SOURCE_URL}" | awk -F/ '{print $1"//"$3}')/"
+              # إذا لم يتكون بشكل صحيح، اتركه فارغاً
+              [ "${REF}" = "//" ] && REF=""
             fi
-            if [ -n "${ORIGIN:-}" ] && [ "${ORIGIN}" != "null" ] && [ "${ORIGIN}" != "''" ]; then
-              H+="Origin: ${ORIGIN}\r\n"
+
+            local ORG="${ORIGIN:-}"
+            if [ -z "${ORG}" ] || [ "${ORG}" = "null" ]; then
+              ORG="$(echo "${SOURCE_URL}" | awk -F/ '{print $1"//"$3}')"
+              [ "${ORG}" = "//" ] && ORG=""
+            fi
+
+            # بناء سطر الهيدرز مع تجاهل القيم الفارغة
+            local H=""
+            if [ -n "${REF}" ] && [ "${REF}" != "null" ] && [ "${REF}" != "''" ]; then
+              H+="Referer: ${REF}\r\n"
+            fi
+            if [ -n "${ORG}" ] && [ "${ORG}" != "null" ] && [ "${ORG}" != "''" ]; then
+              H+="Origin: ${ORG}\r\n"
             fi
             if [ -n "${COOKIES:-}" ] && [ "${COOKIES}" != "null" ] && [ "${COOKIES}" != "''" ]; then
               H+="Cookie: ${COOKIES}\r\n"
