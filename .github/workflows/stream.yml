@@ -1,10 +1,10 @@
-name: "Oma Streaming Engine"
+name: "Oma Streaming Engine Pro"
 
 on:
   workflow_dispatch:
     inputs:
       stream_name:
-        description: 'اسم البث (مهم جدا للتحكم به)'
+        description: 'اسم البث'
         required: true
       source_url:
         description: 'رابط المصدر'
@@ -44,13 +44,13 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: تثبيت FFmpeg (نسخة سريعة)
+      - name: تثبيت شبكة FFmpeg المستقرة
         run: |
           curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o ffmpeg.tar.xz
           tar xf ffmpeg.tar.xz
           sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
 
-      - name: تشغيل محرك البث الخاص بـ Oma
+      - name: إطلاق معالجة البث الذكي
         env:
           STREAM_NAME: ${{ inputs.stream_name }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -68,29 +68,28 @@ jobs:
           REF_BRANCH: ${{ github.ref_name }}
         run: |
           OUTPUT_URL="${RTMP_URL}/${STREAM_KEY}"
-          # التأكد من صحة رابط RTMP لتجنب الأخطاء (بعض المنصات لا تحتاج / بين الرابط والمفتاح)
           if [[ "$RTMP_URL" == */ ]]; then OUTPUT_URL="${RTMP_URL}${STREAM_KEY}"; fi
 
-          echo "🎯 بدء بث: $STREAM_NAME"
+          echo "🎯 تشغيل البث الأسطوري: $STREAM_NAME"
           
-          # تجهيز الهيدرز (Headers)
+          # تجهيز متطلبات الهيدرز والشبكة
           HEADERS=""
-          if [ -n "$REF" ]; then HEADERS="${HEADERS}Referer: ${REF}\r\n"; fi
-          if [ -n "$ORIGIN" ]; then HEADERS="${HEADERS}Origin: ${ORIGIN}\r\n"; fi
+          if [ -n "$REF" ] && [ "$REF" != "null" ]; then HEADERS="${HEADERS}Referer: ${REF}\r\n"; fi
+          if [ -n "$ORIGIN" ] && [ "$ORIGIN" != "null" ]; then HEADERS="${HEADERS}Origin: ${ORIGIN}\r\n"; fi
 
           FFMPEG_CMD="ffmpeg -re"
-          if [ -n "$UA" ]; then FFMPEG_CMD="$FFMPEG_CMD -user_agent \"$UA\""; fi
+          if [ -n "$UA" ] && [ "$UA" != "null" ]; then FFMPEG_CMD="$FFMPEG_CMD -user_agent \"$UA\""; fi
           if [ -n "$HEADERS" ]; then FFMPEG_CMD="$FFMPEG_CMD -headers \"$HEADERS\""; fi
           
           FFMPEG_CMD="$FFMPEG_CMD -fflags +genpts -i \"$SOURCE_URL\""
 
-          # تحميل الشعار إن وجد
+          # التحقق من وجود لوجو وتحميله
           HAS_LOGO=false
-          if [ -n "$LOGO_URL" ] && [ "$LOGO_URL" != "null" ]; then
+          if [ -n "$LOGO_URL" ] && [ "$LOGO_URL" != "null" ] && [ "$LOGO_URL" != "" ]; then
             curl -L -s -o logo.png "$LOGO_URL" && HAS_LOGO=true
           fi
 
-          # بناء فلاتر الفيديو (Scaling & FPS)
+          # بناء الفلاتر الرسومية ودعم التمطيط الكامل للشاشة عبر scale2ref
           V_FILTERS=""
           if [ "$RES" != "source" ]; then
              V_FILTERS="scale=$RES"
@@ -101,20 +100,16 @@ jobs:
 
           if [ "$HAS_LOGO" = true ]; then
              FFMPEG_CMD="$FFMPEG_CMD -i logo.png"
-             # دمج الشعار مع تمديده ليملأ الشاشة بالكامل (مع الحفاظ على الخلفية)
              if [ -n "$V_FILTERS" ]; then
-                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]${V_FILTERS},setsar=1[bg]; [bg][1:v]scale2ref=iw:ih,format=rgba[logo][bg]; [bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
+                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]${V_FILTERS},setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
              else
-                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]setsar=1[bg]; [bg][1:v]scale2ref=iw:ih,format=rgba[logo][bg]; [bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
+                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
              fi
-             # عند وجود شعار يجب إعادة ترميز الفيديو
              FFMPEG_CMD="$FFMPEG_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
           else
-             # بدون شعار
              if [ -n "$V_FILTERS" ]; then
                 FFMPEG_CMD="$FFMPEG_CMD -vf \"$V_FILTERS\" -c:v libx264 -preset ultrafast -tune zerolatency"
              else
-                # إذا كانت كل الإعدادات "مثل المصدر" وبدون شعار، ننسخ الفيديو كما هو لتوفير الموارد
                 if [ "$BITRATE" == "source" ]; then
                    FFMPEG_CMD="$FFMPEG_CMD -c:v copy"
                 else
@@ -124,22 +119,19 @@ jobs:
              FFMPEG_CMD="$FFMPEG_CMD -map 0:v -map 0:a"
           fi
 
-          # إعدادات البيتريت
           if [ "$BITRATE" != "source" ]; then
              FFMPEG_CMD="$FFMPEG_CMD -b:v $BITRATE -maxrate $BITRATE -bufsize $(( ${BITRATE%k} * 2 ))k"
           fi
 
-          # إعدادات الصوت والصيغة النهائية
           FFMPEG_CMD="$FFMPEG_CMD -c:a aac -b:a 128k -ar 44100 -f flv \"$OUTPUT_URL\""
 
-          echo "🚀 تشغيل الأمر:"
+          echo "🚀 أمر الفولاذ الجاري تشغيله حالياً:"
           echo "$FFMPEG_CMD"
           
-          # دورة الحياة (5 ساعات و 40 دقيقة)
+          # الدورة الكاملة بدون تقطيع (5 ساعات و 40 دقيقة)
           MAX_CYCLE=$((5*3600 + 40*60))
           START_TIME=$(date +%s)
 
-          # تشغيل FFmpeg في الخلفية
           eval "$FFMPEG_CMD" &
           FFMPEG_PID=$!
 
@@ -149,7 +141,7 @@ jobs:
             TOTAL_ELAPSED=$((NOW - START_TIME))
 
             if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
-              echo "🔄 حان وقت التجديد التلقائي..."
+              echo "🔄 إعادة تشغيل السيرفر تلقائياً للحفاظ على استمرارية الـ 24 ساعة..."
               kill $FFMPEG_PID 2>/dev/null || true
               
               curl -X POST \
@@ -157,13 +149,11 @@ jobs:
                 -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/${REPO}/actions/workflows/stream.yml/dispatches" \
                 -d "{\"ref\":\"$REF_BRANCH\",\"inputs\":{\"stream_name\":\"$STREAM_NAME\",\"source_url\":\"$SOURCE_URL\",\"rtmp_url\":\"$RTMP_URL\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\",\"resolution\":\"$RES\",\"fps\":\"$FPS\",\"bitrate\":\"$BITRATE\",\"user_agent\":\"$UA\",\"referer\":\"$REF\",\"origin\":\"$ORIGIN\"}}"
-              
-              echo "✅ تم طلب دورة جديدة. إنهاء الحالية."
               exit 0
             fi
 
             if ! kill -0 $FFMPEG_PID 2>/dev/null; then
-              echo "⚠️ توقف FFmpeg فجأة. إعادة التشغيل..."
+              echo "⚠️ تحذير: السورس انقطع! جاري إعادة التشغيل الفوري للمحرك..."
               eval "$FFMPEG_CMD" &
               FFMPEG_PID=$!
             fi
