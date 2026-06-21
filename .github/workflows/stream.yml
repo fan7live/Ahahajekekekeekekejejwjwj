@@ -3,29 +3,27 @@ name: Cancel and Delete All Workflow Runs
 on:
   workflow_dispatch: # يتيح لك تشغيل السكريبت يدوياً بضغطة زر
 
-env:
-  # ⚠️ ضع التوكين الخاص بك هنا بين علامتي التنصيص
-  MY_SUPER_TOKEN: "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"
-
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
       - name: Run Cleanup Script
+        env:
+          # هنا يقرأ السكريبت التوكين من الـ Secrets بشكل مخفي وآمن تماماً
+          GH_TOKEN: ${{ secrets.MY_CLEANUP_TOKEN }}
         run: |
-          # التحقق من تغيير التوكين الافتراضي
-          if [ "${{ env.MY_SUPER_TOKEN }}" = "YOUR_PERSONAL_ACCESS_TOKEN_HERE" ] || [ -z "${{ env.MY_SUPER_TOKEN }}" ]; then
-            echo "❌ خطأ: يرجى وضع التوكين الخاص بك في حقل MY_SUPER_TOKEN أولاً!"
+          # التحقق من أنك قمت بإضافة التوكين في الإعدادات بشكل صحيح
+          if [ -z "$GH_TOKEN" ]; then
+            echo "❌ خطأ: لم يتم العثور على التوكين المسمى MY_CLEANUP_TOKEN في الـ Secrets!"
+            echo "يرجى مراجعة الخطوات وإضافته في إعدادات المستودع أولاً."
             exit 1
           fi
 
-          # تعيين التوكين لأداة GitHub CLI
-          export GH_TOKEN="${{ env.MY_SUPER_TOKEN }}"
           REPO="${{ github.repository }}"
           
           echo "🔄 1. جاري إيقاف جميع الـ Workflows النشطة أو المنتظرة..."
           for status in in_progress queued; do
-            runs=$(gh run list -R "$REPO" --status "$status" --json databaseId --jq '.[].databaseId')
+            runs=$(gh run list -R "$REPO" --status "$status" --json databaseId --jq '.[].databaseId' 2>/dev/null) || true
             for run in $runs; do
               echo "🚫 إيقاف التشغيل رقم: $run"
               gh run cancel -R "$REPO" "$run" || true
@@ -36,8 +34,8 @@ jobs:
           sleep 5
 
           echo "🗑️ 2. جاري حذف تاريخ جميع الـ Workflow runs..."
-          # يجلب أول 100 تشغيل (يمكنك زيادة الـ limit إذا كان العدد ضخماً)
-          runs=$(gh run list -R "$REPO" --limit 100 --json databaseId --jq '.[].databaseId')
+          # يجلب أول 100 تشغيل لحذفها
+          runs=$(gh run list -R "$REPO" --limit 100 --json databaseId --jq '.[].databaseId' 2>/dev/null) || true
           
           if [ -z "$runs" ]; then
             echo "✅ لا توجد مسارات عمل متبقية لحذفها."
