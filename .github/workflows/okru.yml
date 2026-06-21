@@ -1,4 +1,4 @@
-name: "🔴 ${{ inputs.stream_name }}"
+name: "🔴 OMA Streaming"
 
 on:
   workflow_dispatch:
