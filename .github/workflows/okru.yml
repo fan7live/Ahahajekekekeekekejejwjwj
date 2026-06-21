@@ -122,11 +122,29 @@ jobs:
             local -a C
             local H=""
             C+=(-re -fflags +genpts -analyzeduration 3000000 -probesize 2000000)
-            [ -n "${USER_AGENT:-}" ] && C+=(-user_agent "${USER_AGENT}")
-            [ -n "${REFERER:-}"    ] && H+="Referer: ${REFERER}\r\n"
-            [ -n "${ORIGIN:-}"     ] && H+="Origin: ${ORIGIN}\r\n"
-            [ -n "${COOKIES:-}"    ] && H+="Cookie: ${COOKIES}\r\n"
-            [ -n "${H}"            ] && C+=(-headers "${H}")
+
+            # Use a strong default User-Agent if not provided
+            local UA="${USER_AGENT:-}"
+            if [ -z "${UA}" ] || [ "${UA}" = "null" ]; then
+              UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            fi
+            C+=(-user_agent "${UA}")
+
+            # Build headers, ignoring empty or null values
+            local H=""
+            if [ -n "${REFERER:-}" ] && [ "${REFERER}" != "null" ] && [ "${REFERER}" != "''" ]; then
+              H+="Referer: ${REFERER}\r\n"
+            fi
+            if [ -n "${ORIGIN:-}" ] && [ "${ORIGIN}" != "null" ] && [ "${ORIGIN}" != "''" ]; then
+              H+="Origin: ${ORIGIN}\r\n"
+            fi
+            if [ -n "${COOKIES:-}" ] && [ "${COOKIES}" != "null" ] && [ "${COOKIES}" != "''" ]; then
+              H+="Cookie: ${COOKIES}\r\n"
+            fi
+            if [ -n "${H}" ]; then
+              C+=(-headers "${H}")
+            fi
+
             C+=(-i "${SOURCE_URL}")
             local SF="setsar=1"
             if [ "${QUALITY:-source}" != "source" ] && [ -n "${QUALITY:-}" ]; then
