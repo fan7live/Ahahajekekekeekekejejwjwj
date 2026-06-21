@@ -1,38 +1,50 @@
-name: Cancel And Delete Runs
+name: Cancel and Delete All Workflow Runs
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # يتيح لك تشغيل السكريبت يدوياً بضغطة زر
+
+env:
+  # ⚠️ ضع التوكين الخاص بك هنا بين علامتي التنصيص
+  MY_SUPER_TOKEN: "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"
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Cancel running workflows
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run Cleanup Script
         run: |
+          # التحقق من تغيير التوكين الافتراضي
+          if [ "${{ env.MY_SUPER_TOKEN }}" = "YOUR_PERSONAL_ACCESS_TOKEN_HERE" ] || [ -z "${{ env.MY_SUPER_TOKEN }}" ]; then
+            echo "❌ خطأ: يرجى وضع التوكين الخاص بك في حقل MY_SUPER_TOKEN أولاً!"
+            exit 1
+          fi
+
+          # تعيين التوكين لأداة GitHub CLI
+          export GH_TOKEN="${{ env.MY_SUPER_TOKEN }}"
           REPO="${{ github.repository }}"
-
-          # إلغاء جميع الـ runs الجارية
-          for RUN_ID in $(gh api repos/$REPO/actions/runs \
-            --jq '.workflow_runs[] | select(.status=="in_progress" or .status=="queued") | .id'); do
-
-            echo "Cancelling $RUN_ID"
-            gh api -X POST repos/$REPO/actions/runs/$RUN_ID/cancel
+          
+          echo "🔄 1. جاري إيقاف جميع الـ Workflows النشطة أو المنتظرة..."
+          for status in in_progress queued; do
+            runs=$(gh run list -R "$REPO" --status "$status" --json databaseId --jq '.[].databaseId')
+            for run in $runs; do
+              echo "🚫 إيقاف التشغيل رقم: $run"
+              gh run cancel -R "$REPO" "$run" || true
+            done
           done
 
-      - name: Delete workflow runs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          REPO="${{ github.repository }}"
+          echo "⏳ الانتظار 5 ثوانٍ للتأكد من اكتمال الإلغاء..."
+          sleep 5
 
-          # حذف جميع الـ runs
-          for RUN_ID in $(gh api repos/$REPO/actions/runs \
-            --paginate \
-            --jq '.workflow_runs[].id'); do
-
-            echo "Deleting $RUN_ID"
-            gh api -X DELETE repos/$REPO/actions/runs/$RUN_ID
-          done
+          echo "🗑️ 2. جاري حذف تاريخ جميع الـ Workflow runs..."
+          # يجلب أول 100 تشغيل (يمكنك زيادة الـ limit إذا كان العدد ضخماً)
+          runs=$(gh run list -R "$REPO" --limit 100 --json databaseId --jq '.[].databaseId')
+          
+          if [ -z "$runs" ]; then
+            echo "✅ لا توجد مسارات عمل متبقية لحذفها."
+          else
+            for run in $runs; do
+              echo "❌ حذف السجل رقم: $run"
+              gh run delete -R "$REPO" "$run" --yes || true
+            done
+            echo "✨ تم تنظيف وإيقاف جميع الـ Workflows بنجاح!"
+          fi
