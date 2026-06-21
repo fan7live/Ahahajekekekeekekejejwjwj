@@ -101,11 +101,11 @@ jobs:
 
           if [ "$HAS_LOGO" = true ]; then
              FFMPEG_CMD="$FFMPEG_CMD -i logo.png"
-             # دمج الشعار مع تمديده ليملأ الشاشة بالكامل باستخدام scale2ref
+             # دمج الشعار مع تمديده ليملأ الشاشة بالكامل (مع الحفاظ على الخلفية)
              if [ -n "$V_FILTERS" ]; then
-                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]${V_FILTERS},setsar=1[bg]; [bg][1:v]scale2ref=iw:ih,format=rgba[logo]; [bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
+                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]${V_FILTERS},setsar=1[bg]; [bg][1:v]scale2ref=iw:ih,format=rgba[logo][bg]; [bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
              else
-                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]setsar=1[bg]; [bg][1:v]scale2ref=iw:ih,format=rgba[logo]; [bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
+                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]setsar=1[bg]; [bg][1:v]scale2ref=iw:ih,format=rgba[logo][bg]; [bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
              fi
              # عند وجود شعار يجب إعادة ترميز الفيديو
              FFMPEG_CMD="$FFMPEG_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
