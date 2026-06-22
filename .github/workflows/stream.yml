@@ -51,7 +51,7 @@ jobs:
           tar xf ffmpeg.tar.xz
           sudo cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
 
-      - name: إطلاق معالجة البث الذكي
+      - name: إطلاق معالجة البث الذكي ونظام الطوارئ
         env:
           STREAM_NAME: ${{ inputs.stream_name }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -78,12 +78,6 @@ jobs:
           if [ -n "$REF" ] && [ "$REF" != "null" ]; then HEADERS="${HEADERS}Referer: ${REF}\r\n"; fi
           if [ -n "$ORIGIN" ] && [ "$ORIGIN" != "null" ]; then HEADERS="${HEADERS}Origin: ${ORIGIN}\r\n"; fi
 
-          FFMPEG_CMD="ffmpeg -re"
-          if [ -n "$UA" ] && [ "$UA" != "null" ]; then FFMPEG_CMD="$FFMPEG_CMD -user_agent \"$UA\""; fi
-          if [ -n "$HEADERS" ]; then FFMPEG_CMD="$FFMPEG_CMD -headers \"$HEADERS\""; fi
-          
-          FFMPEG_CMD="$FFMPEG_CMD -fflags +genpts -i \"$SOURCE_URL\""
-
           # التحقق من وجود لوجو وتحميله
           HAS_LOGO=false
           if [ -n "$LOGO_URL" ] && [ "$LOGO_URL" != "null" ] && [ "$LOGO_URL" != "" ]; then
@@ -99,63 +93,152 @@ jobs:
              if [ -n "$V_FILTERS" ]; then V_FILTERS="$V_FILTERS,fps=$FPS"; else V_FILTERS="fps=$FPS"; fi
           fi
 
+          # ==============================================================
+          # 1. بناء أمر البث الأساسي (كما هو بأسلوبك دون تغيير)
+          # ==============================================================
+          FFMPEG_MAIN_CMD="ffmpeg -re"
+          if [ -n "$UA" ] && [ "$UA" != "null" ]; then FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -user_agent \"$UA\""; fi
+          if [ -n "$HEADERS" ]; then FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -headers \"$HEADERS\""; fi
+          
+          FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -fflags +genpts -i \"$SOURCE_URL\""
+
           if [ "$HAS_LOGO" = true ]; then
-             FFMPEG_CMD="$FFMPEG_CMD -i logo.png"
+             FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -i logo.png"
              if [ -n "$V_FILTERS" ]; then
-                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]${V_FILTERS},setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
+                FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -filter_complex \"[0:v]${V_FILTERS},setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
              else
-                FFMPEG_CMD="$FFMPEG_CMD -filter_complex \"[0:v]setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
+                FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -filter_complex \"[0:v]setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a"
              fi
-             FFMPEG_CMD="$FFMPEG_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
+             FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
           else
              if [ -n "$V_FILTERS" ]; then
-                FFMPEG_CMD="$FFMPEG_CMD -vf \"$V_FILTERS\" -c:v libx264 -preset ultrafast -tune zerolatency"
+                FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -vf \"$V_FILTERS\" -c:v libx264 -preset ultrafast -tune zerolatency"
              else
                 if [ "$BITRATE" == "source" ]; then
-                   FFMPEG_CMD="$FFMPEG_CMD -c:v copy"
+                   FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -c:v copy"
                 else
-                   FFMPEG_CMD="$FFMPEG_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
+                   FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
                 fi
              fi
-             FFMPEG_CMD="$FFMPEG_CMD -map 0:v -map 0:a"
+             FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -map 0:v -map 0:a"
           fi
 
           if [ "$BITRATE" != "source" ]; then
-             FFMPEG_CMD="$FFMPEG_CMD -b:v $BITRATE -maxrate $BITRATE -bufsize $(( ${BITRATE%k} * 2 ))k"
+             FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -b:v $BITRATE -maxrate $BITRATE -bufsize $(( ${BITRATE%k} * 2 ))k"
           fi
 
-          FFMPEG_CMD="$FFMPEG_CMD -c:a aac -b:a 128k -ar 44100 -f flv \"$OUTPUT_URL\""
+          FFMPEG_MAIN_CMD="$FFMPEG_MAIN_CMD -c:a aac -b:a 128k -ar 44100 -f flv \"$OUTPUT_URL\""
 
-          echo "🚀 أمر الفولاذ الجاري تشغيله حالياً:"
-          echo "$FFMPEG_CMD"
+          # ==============================================================
+          # 2. بناء أمر بث الطوارئ (مع التكرار وسحب جودة 1080p)
+          # ==============================================================
+          FALLBACK_URL="https://stream.mux.com/flpPLp41zTvICKo8nbh3s5K2CNPSI5D8KStGqVLogkI.m3u8?redundant_streams=true"
           
-          # الدورة الكاملة بدون تقطيع (5 ساعات و 40 دقيقة)
+          # إضافة stream_loop -1 لتكرار الفيديو تلقائياً
+          FFMPEG_FALLBACK_CMD="ffmpeg -re -stream_loop -1 -fflags +genpts -i \"$FALLBACK_URL\""
+
+          if [ "$HAS_LOGO" = true ]; then
+             FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -i logo.png"
+             if [ -n "$V_FILTERS" ]; then
+                # تم إضافة 0:v:0 لسحب الجودة الأولى (1080p) من ملف Mux
+                FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -filter_complex \"[0:v:0]${V_FILTERS},setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a:0"
+             else
+                FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -filter_complex \"[0:v:0]setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a:0"
+             fi
+             FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -c:v libx264 -preset ultrafast -tune zerolatency"
+          else
+             if [ -n "$V_FILTERS" ]; then
+                FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -vf \"$V_FILTERS\" -c:v libx264 -preset ultrafast -tune zerolatency -map 0:v:0 -map 0:a:0"
+             else
+                # دائماً نعمل إنكود للطوارئ لتثبيت الجودة على 1080p وتفادي الأخطاء
+                FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -c:v libx264 -preset ultrafast -tune zerolatency -map 0:v:0 -map 0:a:0"
+             fi
+          fi
+
+          if [ "$BITRATE" != "source" ]; then
+             FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -b:v $BITRATE -maxrate $BITRATE -bufsize $(( ${BITRATE%k} * 2 ))k"
+          fi
+
+          FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -c:a aac -b:a 128k -ar 44100 -f flv \"$OUTPUT_URL\""
+
+          # ==============================================================
+          # 3. محرك الإدارة والمراقبة الذكي
+          # ==============================================================
           MAX_CYCLE=$((5*3600 + 40*60))
           START_TIME=$(date +%s)
 
-          eval "$FFMPEG_CMD" &
-          FFMPEG_PID=$!
+          # دالة لفحص ما إذا كان المصدر الأساسي حياً وقابلاً للقراءة
+          check_source_alive() {
+             if [ -n "$HEADERS" ]; then
+                timeout 5 ffprobe -headers "$HEADERS" -v quiet -t 2 -i "$SOURCE_URL" > /dev/null 2>&1
+             else
+                timeout 5 ffprobe -v quiet -t 2 -i "$SOURCE_URL" > /dev/null 2>&1
+             fi
+             return $?
+          }
 
           while true; do
-            sleep 15
-            NOW=$(date +%s)
-            TOTAL_ELAPSED=$((NOW - START_TIME))
-
-            if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
-              echo "🔄 إعادة تشغيل السيرفر تلقائياً للحفاظ على استمرارية الـ 24 ساعة..."
-              kill $FFMPEG_PID 2>/dev/null || true
-              
-              curl -X POST \
-                -H "Authorization: token $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${REPO}/actions/workflows/stream.yml/dispatches" \
-                -d "{\"ref\":\"$REF_BRANCH\",\"inputs\":{\"stream_name\":\"$STREAM_NAME\",\"source_url\":\"$SOURCE_URL\",\"rtmp_url\":\"$RTMP_URL\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\",\"resolution\":\"$RES\",\"fps\":\"$FPS\",\"bitrate\":\"$BITRATE\",\"user_agent\":\"$UA\",\"referer\":\"$REF\",\"origin\":\"$ORIGIN\"}}"
-              exit 0
+            echo "🔍 جاري فحص حالة المصدر الأساسي..."
+            if check_source_alive; then
+                echo "✅ المصدر الأساسي يعمل بثبات! جاري البث..."
+                eval "$FFMPEG_MAIN_CMD" &
+                CURRENT_PID=$!
+                
+                # طالما البث الأساسي يعمل، راقبه وتأكد من دورة الـ 24 ساعة
+                while kill -0 $CURRENT_PID 2>/dev/null; do
+                    sleep 10
+                    NOW=$(date +%s)
+                    TOTAL_ELAPSED=$((NOW - START_TIME))
+                    if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
+                        echo "🔄 إعادة تشغيل السيرفر تلقائياً للحفاظ على استمرارية الـ 24 ساعة..."
+                        kill $CURRENT_PID 2>/dev/null || true
+                        curl -X POST \
+                          -H "Authorization: token $GITHUB_TOKEN" \
+                          -H "Accept: application/vnd.github.v3+json" \
+                          "https://api.github.com/repos/${REPO}/actions/workflows/stream.yml/dispatches" \
+                          -d "{\"ref\":\"$REF_BRANCH\",\"inputs\":{\"stream_name\":\"$STREAM_NAME\",\"source_url\":\"$SOURCE_URL\",\"rtmp_url\":\"$RTMP_URL\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\",\"resolution\":\"$RES\",\"fps\":\"$FPS\",\"bitrate\":\"$BITRATE\",\"user_agent\":\"$UA\",\"referer\":\"$REF\",\"origin\":\"$ORIGIN\"}}"
+                        exit 0
+                    fi
+                done
+                echo "⚠️ تحذير: انقطع المصدر الأساسي!"
+            else
+                echo "❌ المصدر الأساسي متوقف. تم تفعيل نظام الطوارئ (فيديو 1080p)..."
+                eval "$FFMPEG_FALLBACK_CMD" &
+                CURRENT_PID=$!
+                
+                CHECK_TIMER=0
+                # طالما فيديو الطوارئ يعمل، ابحث عن عودة المصدر الأساسي
+                while kill -0 $CURRENT_PID 2>/dev/null; do
+                    sleep 5
+                    CHECK_TIMER=$((CHECK_TIMER + 5))
+                    
+                    # فحص دورة الـ 24 ساعة أثناء الطوارئ أيضاً
+                    NOW=$(date +%s)
+                    TOTAL_ELAPSED=$((NOW - START_TIME))
+                    if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
+                        echo "🔄 إعادة تشغيل السيرفر تلقائياً للحفاظ على استمرارية الـ 24 ساعة..."
+                        kill $CURRENT_PID 2>/dev/null || true
+                        curl -X POST \
+                          -H "Authorization: token $GITHUB_TOKEN" \
+                          -H "Accept: application/vnd.github.v3+json" \
+                          "https://api.github.com/repos/${REPO}/actions/workflows/stream.yml/dispatches" \
+                          -d "{\"ref\":\"$REF_BRANCH\",\"inputs\":{\"stream_name\":\"$STREAM_NAME\",\"source_url\":\"$SOURCE_URL\",\"rtmp_url\":\"$RTMP_URL\",\"stream_key\":\"$STREAM_KEY\",\"logo_url\":\"$LOGO_URL\",\"resolution\":\"$RES\",\"fps\":\"$FPS\",\"bitrate\":\"$BITRATE\",\"user_agent\":\"$UA\",\"referer\":\"$REF\",\"origin\":\"$ORIGIN\"}}"
+                        exit 0
+                    fi
+                    
+                    # فحص المصدر الأساسي كل 20 ثانية بالضبط
+                    if [ $CHECK_TIMER -ge 20 ]; then
+                        CHECK_TIMER=0
+                        echo "🔄 محاولة الاتصال بالمصدر الأساسي..."
+                        if check_source_alive; then
+                            echo "🎉 المصدر الأساسي عاد للعمل! جاري إيقاف الطوارئ والتبديل فوراً..."
+                            kill $CURRENT_PID 2>/dev/null || true
+                            break # كسر اللوب للعودة للبداية وتشغيل البث الأساسي
+                        fi
+                    fi
+                done
             fi
-
-            if ! kill -0 $FFMPEG_PID 2>/dev/null; then
-              echo "⚠️ تحذير: السورس انقطع! جاري إعادة التشغيل الفوري للمحرك..."
-              eval "$FFMPEG_CMD" &
-              FFMPEG_PID=$!
-            fi
+            
+            # استراحة بسيطة لتخفيف الضغط قبل إعادة المحاولة
+            sleep 2
           done
