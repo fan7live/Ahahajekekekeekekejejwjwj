@@ -1,4 +1,5 @@
 name: "Oma Streaming Engine Pro"
+run-name: ${{ inputs.stream_name }}
 
 on:
   workflow_dispatch:
