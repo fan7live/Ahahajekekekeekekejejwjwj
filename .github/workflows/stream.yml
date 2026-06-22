@@ -134,13 +134,11 @@ jobs:
           # ==============================================================
           FALLBACK_URL="https://stream.mux.com/flpPLp41zTvICKo8nbh3s5K2CNPSI5D8KStGqVLogkI.m3u8?redundant_streams=true"
           
-          # إضافة stream_loop -1 لتكرار الفيديو تلقائياً
           FFMPEG_FALLBACK_CMD="ffmpeg -re -stream_loop -1 -fflags +genpts -i \"$FALLBACK_URL\""
 
           if [ "$HAS_LOGO" = true ]; then
              FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -i logo.png"
              if [ -n "$V_FILTERS" ]; then
-                # تم إضافة 0:v:0 لسحب الجودة الأولى (1080p) من ملف Mux
                 FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -filter_complex \"[0:v:0]${V_FILTERS},setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a:0"
              else
                 FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -filter_complex \"[0:v:0]setsar=1[bg];[1:v][bg]scale2ref=iw:ih[logo][bg];[bg][logo]overlay=0:0:eof_action=repeat[v]\" -map \"[v]\" -map 0:a:0"
@@ -150,7 +148,6 @@ jobs:
              if [ -n "$V_FILTERS" ]; then
                 FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -vf \"$V_FILTERS\" -c:v libx264 -preset ultrafast -tune zerolatency -map 0:v:0 -map 0:a:0"
              else
-                # دائماً نعمل إنكود للطوارئ لتثبيت الجودة على 1080p وتفادي الأخطاء
                 FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -c:v libx264 -preset ultrafast -tune zerolatency -map 0:v:0 -map 0:a:0"
              fi
           fi
@@ -162,29 +159,32 @@ jobs:
           FFMPEG_FALLBACK_CMD="$FFMPEG_FALLBACK_CMD -c:a aac -b:a 128k -ar 44100 -f flv \"$OUTPUT_URL\""
 
           # ==============================================================
-          # 3. محرك الإدارة والمراقبة الذكي
+          # 3. محرك الإدارة والمراقبة الذكي بعد إصلاح الهيدرز
           # ==============================================================
           MAX_CYCLE=$((5*3600 + 40*60))
           START_TIME=$(date +%s)
 
-          # دالة لفحص ما إذا كان المصدر الأساسي حياً وقابلاً للقراءة
+          # دالة الفحص بعد تمرير الـ User Agent والـ Headers لضمان عدم الحظر أو القراءة الخاطئة للبيانات
           check_source_alive() {
-             if [ -n "$HEADERS" ]; then
-                timeout 5 ffprobe -headers "$HEADERS" -v quiet -t 2 -i "$SOURCE_URL" > /dev/null 2>&1
+             if [ -n "$UA" ] && [ "$UA" != "null" ] && [ -n "$HEADERS" ]; then
+                timeout 12 ffprobe -user_agent "$UA" -headers "$HEADERS" -v error -probesize 1000000 -analyzeduration 2000000 -i "$SOURCE_URL" > /dev/null 2>&1
+             elif [ -n "$UA" ] && [ "$UA" != "null" ]; then
+                timeout 12 ffprobe -user_agent "$UA" -v error -probesize 1000000 -analyzeduration 2000000 -i "$SOURCE_URL" > /dev/null 2>&1
+             elif [ -n "$HEADERS" ]; then
+                timeout 12 ffprobe -headers "$HEADERS" -v error -probesize 1000000 -analyzeduration 2000000 -i "$SOURCE_URL" > /dev/null 2>&1
              else
-                timeout 5 ffprobe -v quiet -t 2 -i "$SOURCE_URL" > /dev/null 2>&1
+                timeout 12 ffprobe -v error -probesize 1000000 -analyzeduration 2000000 -i "$SOURCE_URL" > /dev/null 2>&1
              fi
              return $?
           }
 
           while true; do
-            echo "🔍 جاري فحص حالة المصدر الأساسي..."
+            echo "🔍 جاري فحص حالة المصدر الأساسي وحجم البيانات..."
             if check_source_alive; then
-                echo "✅ المصدر الأساسي يعمل بثبات! جاري البث..."
+                echo "✅ المصدر الأساسي مستقر ويجلب بيانات حقيقية! جاري تشغيل البث..."
                 eval "$FFMPEG_MAIN_CMD" &
                 CURRENT_PID=$!
                 
-                # طالما البث الأساسي يعمل، راقبه وتأكد من دورة الـ 24 ساعة
                 while kill -0 $CURRENT_PID 2>/dev/null; do
                     sleep 10
                     NOW=$(date +%s)
@@ -200,19 +200,17 @@ jobs:
                         exit 0
                     fi
                 done
-                echo "⚠️ تحذير: انقطع المصدر الأساسي!"
+                echo "⚠️ تحذير: انقطع المصدر الأساسي أو تجمّدت بياناته!"
             else
-                echo "❌ المصدر الأساسي متوقف. تم تفعيل نظام الطوارئ (فيديو 1080p)..."
+                echo "❌ المصدر متوقف أو حجم بياناته صفر. تشغيل بث الطوارئ (Mux 1080p)..."
                 eval "$FFMPEG_FALLBACK_CMD" &
                 CURRENT_PID=$!
                 
                 CHECK_TIMER=0
-                # طالما فيديو الطوارئ يعمل، ابحث عن عودة المصدر الأساسي
                 while kill -0 $CURRENT_PID 2>/dev/null; do
                     sleep 5
                     CHECK_TIMER=$((CHECK_TIMER + 5))
                     
-                    # فحص دورة الـ 24 ساعة أثناء الطوارئ أيضاً
                     NOW=$(date +%s)
                     TOTAL_ELAPSED=$((NOW - START_TIME))
                     if [ $TOTAL_ELAPSED -ge $MAX_CYCLE ]; then
@@ -226,19 +224,16 @@ jobs:
                         exit 0
                     fi
                     
-                    # فحص المصدر الأساسي كل 20 ثانية بالضبط
                     if [ $CHECK_TIMER -ge 20 ]; then
                         CHECK_TIMER=0
-                        echo "🔄 محاولة الاتصال بالمصدر الأساسي..."
+                        echo "🔄 فحص المصدر الأساسي (كل 20 ثانية)..."
                         if check_source_alive; then
-                            echo "🎉 المصدر الأساسي عاد للعمل! جاري إيقاف الطوارئ والتبديل فوراً..."
+                            echo "🎉 عاد المصدر الأساسي لضخ البيانات! إيقاف الطوارئ والتحويل فوراً..."
                             kill $CURRENT_PID 2>/dev/null || true
-                            break # كسر اللوب للعودة للبداية وتشغيل البث الأساسي
+                            break
                         fi
                     fi
                 done
             fi
-            
-            # استراحة بسيطة لتخفيف الضغط قبل إعادة المحاولة
             sleep 2
           done
